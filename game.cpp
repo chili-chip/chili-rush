@@ -385,6 +385,7 @@ struct Obj {
     float h;          // height above the road (pickups on jump arcs)
     float vx;         // lateral speed (tumbleweed)
     float target_x;   // tumbleweed: lane it rolls to
+    float from_x;     // tumbleweed that settles: lane it starts from
     bool collected;
     bool smashed;
     float fly;        // smashed: time since smash
@@ -752,6 +753,7 @@ void spawn_row(float s) {
     Kind lane_kind[3] = {K_NONE, K_NONE, K_NONE};
 
     bool weed = false;
+    int settle_lane = -1;
     int pattern = rnd_int(100);
     if(total_distance(run.distance) < 120.0f) {
         // first rows of a run: one easy obstacle at a time, to warm up
@@ -775,13 +777,25 @@ void spawn_row(float s) {
     } else {
         // a tumbleweed rolling across, plus maybe a sign in the middle lane
         weed = true;
-        int from = chance(0.5f) ? 0 : 2;
-        Obj *w = spawn(K_WEED, lane_x(from), s);
-        if(w) {
-            w->target_x = lane_x(2 - from);
-            w->vx = (w->target_x - w->x) / 1.6f;  // crosses the road in 1.6 s
+        if(d > 0.25f && chance(0.35f)) {
+            // ...or one that rolls into the lane of a chili line and stays
+            settle_lane = rnd_int(3);
+            int from = settle_lane == 1 ? (chance(0.5f) ? 0 : 2) : 2 - settle_lane;
+            Obj *w = spawn(K_WEED, lane_x(from), s);
+            if(w) {
+                w->art = 1;
+                w->from_x = lane_x(from);
+                w->target_x = lane_x(settle_lane);
+            }
+        } else {
+            int from = chance(0.5f) ? 0 : 2;
+            Obj *w = spawn(K_WEED, lane_x(from), s);
+            if(w) {
+                w->target_x = lane_x(2 - from);
+                w->vx = (w->target_x - w->x) / 1.6f;  // crosses the road in 1.6 s
+            }
+            if(d > 0.3f && chance(0.5f)) lane_kind[1] = K_HIGH;
         }
-        if(d > 0.3f && chance(0.5f)) lane_kind[1] = K_HIGH;
     }
 
     for(int l = 0; l < 3; l++)
@@ -792,7 +806,13 @@ void spawn_row(float s) {
     for(int l = 0; l < 3; l++)
         if(lane_kind[l] == K_NONE) free_lanes[nf++] = l;
     int line_lane = -1;
-    if(nf > 0 && chance(0.75f)) {
+    if(settle_lane >= 0) {
+        // the bait: chilis right up to where the tumbleweed stops
+        line_lane = settle_lane;
+        float end = s - (HIT_DEPTH + 0.4f);
+        int n = std::max(2, std::min(5, int((min_gap() * 0.9f - (HIT_DEPTH + 0.4f)) / 0.7f) + 1));
+        chili_line(line_lane, end - float(n - 1) * 0.7f, n, 0.7f);
+    } else if(nf > 0 && chance(0.75f)) {
         line_lane = free_lanes[rnd_int(nf)];
         // stays clear of the next row, which is at least min_gap() * 1.1 away
         int most = int(min_gap() * 1.4f / 0.7f);
@@ -1051,13 +1071,30 @@ bool clears(const Body &b, Kind k) {
 
 
 // Does the obstacle hit a body whose feet are at `distance`?
+// A tumbleweed is a 16 px ball, not a lane-wide obstacle: it hits when it
+// overlaps the runner's body (12 px between centres at the runner's depth).
+constexpr float WEED_HIT = 12.0f / float(PLAYER_FEET_Y - HORIZON);
+
 bool hits(const Body &b, const Obj &o, float distance) {
-    return is_obstacle(o.kind) && fabsf(o.s - distance) < HIT_DEPTH && in_lane_of(o, b.x) && !clears(b, o.kind);
+    bool lane = o.kind == K_WEED ? fabsf(o.x - b.x) < WEED_HIT : in_lane_of(o, b.x);
+    return is_obstacle(o.kind) && fabsf(o.s - distance) < HIT_DEPTH && lane && !clears(b, o.kind);
 }
+
+// Now and then a tumbleweed rolls into the lane of a chili line and stops
+// there (art 1), well before it reaches the runner.
+constexpr float WEED_SETTLE_FROM = 28.0f;            // depth where it starts to roll over
+constexpr float WEED_SETTLE_AT = Z_PLAYER + 10.0f;   // depth where it has stopped
+bool weed_settles(const Obj &o) { return o.kind == K_WEED && o.art == 1; }
 
 // Tumbleweed: starts rolling once it is close enough to be seen (depth z),
 // then rolls from side to side.
 void roll_weed(Obj &o, float z) {
+    if(weed_settles(o)) {
+        float f = clampf((WEED_SETTLE_FROM - z) / (WEED_SETTLE_FROM - WEED_SETTLE_AT), 0.0f, 1.0f);
+        f = f * f * (3.0f - 2.0f * f);
+        o.x = o.from_x + (o.target_x - o.from_x) * f;
+        return;
+    }
     if(z >= 16.0f) return;
     o.x += o.vx * DT;
     if((o.vx > 0.0f && o.x > o.target_x) || (o.vx < 0.0f && o.x < o.target_x)) {

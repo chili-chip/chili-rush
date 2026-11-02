@@ -1140,6 +1140,77 @@ void flow_cars() {
     }
 }
 
+// The tumbleweed hits only where it is drawn: a 16 px ball against the
+// runner's body, not half a lane either side of its centre.
+void flow_weed_hitbox() {
+    Body b{};
+    b.lane = 1;
+    b.x = 0.0f;
+    Obj w{};
+    w.kind = K_WEED;
+    w.s = 10.0f;
+    float px = 1.0f / float(PLAYER_FEET_Y - ::HORIZON);  // world width of a screen pixel at the runner
+    w.x = 6.0f * px;                                    // overlapping the body
+    bool hit_near = hits(b, w, 10.0f);
+    w.x = 16.0f * px;                                   // edge to edge: the ball rolls past
+    bool hit_beside = hits(b, w, 10.0f);
+    w.x = -16.0f * px;
+    hit_beside |= hits(b, w, 10.0f);
+    expect(hit_near && !hit_beside, "flow: tumbleweed hitbox", "hit when overlapping %d, hit when 16 px beside %d (want 1, 0)",
+           hit_near, hit_beside);
+    // the other obstacles keep their lane-wide hitbox
+    Obj f{};
+    f.kind = K_LOW;
+    f.s = 10.0f;
+    f.x = 16.0f * px;
+    expect(hits(b, f, 10.0f), "flow: tumbleweed hitbox", "a fence 16 px off centre no longer hits");
+}
+
+// Now and then a tumbleweed rolls into the lane of a chili line and stays
+// there, so a runner picking up chilis has to jump it or move.
+void flow_weed_settle() {
+    fresh_save();
+    to_running();
+    warp(1500.0f);
+    int weeds = 0, settlers = 0, bad_lane = 0, no_chilis = 0, late = 0;
+    std::vector<const Obj *> seen;
+    for(int i = 0; i < 80000; i++) {
+        st_ghost = true;
+        step();
+        for(auto &o : objs) {
+            if(o.kind != K_WEED || o.done) continue;
+            float z = depth_of(o);
+            if(z > Z_FAR) continue;
+            bool counted = false;
+            for(auto *p : seen) counted |= p == &o && fabsf(p->s - o.s) < 0.01f;
+            if(!counted && z < Z_FAR - 1.0f) {
+                seen.push_back(&o);
+                if(seen.size() > 40) seen.erase(seen.begin());
+                weeds++;
+                if(weed_settles(o)) {
+                    settlers++;
+                    // a chili line in the lane it will stop in, just before it
+                    int chilis = 0;
+                    for(auto &c : objs)
+                        if(c.kind == K_CHILI && fabsf(c.x - o.target_x) < 0.01f && c.s < o.s && c.s > o.s - 8.0f) chilis++;
+                    if(chilis < 2) no_chilis++;
+                }
+            }
+            if(weed_settles(o) && z < Z_PLAYER + 9.0f) {
+                int lane = int(roundf(o.x / LANE_W)) + 1;
+                if(lane < 0 || lane > 2 || fabsf(o.x - lane_x(lane)) > 0.001f) bad_lane++;
+                if(fabsf(o.x - o.target_x) > 0.001f) late++;
+            }
+        }
+    }
+    st_ghost = false;
+    expect(weeds >= 20 && settlers * 100 >= weeds * 15 && settlers * 100 <= weeds * 50, "flow: tumbleweed settles",
+           "%d of %d tumbleweeds stop in a lane (want 15-50%%)", settlers, weeds);
+    expect(bad_lane == 0 && late == 0 && no_chilis == 0, "flow: tumbleweed settles",
+           "near the runner: %d off a lane, %d not yet stopped; %d stop with no chili line before them", bad_lane, late, no_chilis);
+    fresh_save();
+}
+
 // Every paintable colour is one palette entry of the sprite sheet, and
 // changing a style touches that obstacle's entries and nothing else.
 void flow_style_paint() {
@@ -1584,6 +1655,8 @@ void flows() {
     flow_intro();
     flow_dust_at_feet();
     flow_alt_moves();
+    flow_weed_hitbox();
+    flow_weed_settle();
     st_ghost = false;
     fresh_save();
 }
