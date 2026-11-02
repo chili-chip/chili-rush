@@ -1170,6 +1170,100 @@ void flow_alt_jump_looks_different() {
            double(up * 100.0f), double(top * 100.0f), double(down * 100.0f));
 }
 
+// Big moments get a big effect ("hype"): flames from the bottom of the
+// screen, hit markers, a bouncing line of text and an air horn. A new best,
+// a new biome, 100/200/500/1000/2000/5000 chilis in one run, and (smaller) a
+// close call each start one; it ends by itself and leaves the drawing state
+// clean.
+void flow_hype() {
+    auto render_ok = [](const char *what) {
+        bool ok = true;
+        for(int i = 0; i < 40; i++) {
+            step();
+            ::render(clock_ms);
+            ok &= screen.alpha == 255 && finite_all();
+        }
+        expect(ok, "flow: hype", "%s: drawing left alpha or NaN", what);
+    };
+
+    // chilis in one run
+    fresh_save();
+    if(!to_running()) return;
+    Obj ch{};
+    ch.kind = K_CHILI;
+    const uint32_t marks[] = {100, 200, 500, 1000, 2000, 5000};
+    for(uint32_t m : marks) {
+        hype = Hype{};
+        run.chilis = m - 1;
+        collect(ch);
+        char want[16];
+        snprintf(want, sizeof(want), "%u CHILIS", m);
+        expect(hype_active(HYPE_CHILIS) && strcmp(hype.text, want) == 0, "flow: hype chilis",
+               "chili number %u: hype %d '%s', want '%s'", m, int(hype.kind), hype.text, want);
+    }
+    for(uint32_t n : {101u, 300u, 999u}) {
+        hype = Hype{};
+        run.chilis = n - 1;
+        collect(ch);
+        expect(!hype_active(HYPE_CHILIS), "flow: hype chilis", "chili number %u started a hype", n);
+    }
+    run.chilis = 499;
+    collect(ch);
+    render_ok("500 chilis");
+
+    // a new best, once per run
+    fresh_save();
+    save.best = 40;
+    if(!to_running()) return;
+    hype = Hype{};
+    run.score = 41;
+    step();
+    expect(hype_active(HYPE_BEST), "flow: hype best", "beating the best started hype %d", int(hype.kind));
+    render_ok("new best");
+    hype = Hype{};
+    run.score += 100;
+    steps(5);
+    expect(!hype_active(HYPE_BEST), "flow: hype best", "a second hype for the same best");
+
+    // a new biome
+    fresh_save();
+    if(!to_running()) return;
+    warp(890.0f);
+    hype = Hype{};
+    int b0 = biome_at(run.distance), n = 0;
+    while(biome_at(run.distance) == b0 && n++ < 3000) {
+        st_ghost = true;
+        step();
+    }
+    st_ghost = false;
+    expect(hype_active(HYPE_BIOME), "flow: hype biome", "entering a new biome started hype %d", int(hype.kind));
+    render_ok("new biome");
+
+    // a close call (the dodge from flow_close_calls)
+    fresh_save();
+    if(!to_running()) return;
+    for(auto &o : objs) if(o.kind != K_DECOR) o.kind = K_NONE;
+    run.next_spawn = run.distance + 60.0f;
+    run.p = Body{0, lane_x(0), 0, 0, 0, false};
+    float s = run.distance + run.speed * 0.2f;
+    spawn(K_BLOCK, lane_x(0), s);
+    spawn(K_BLOCK, lane_x(2), s);
+    hype = Hype{};
+    step(Button::DPAD_RIGHT);
+    bool seen = false;
+    for(int i = 0; i < 60 && !seen; i++) {
+        step();
+        seen = hype_active(HYPE_CLOSE);
+    }
+    expect(seen && run.close_calls == 1, "flow: hype close call", "close call %u, hype %d", run.close_calls, int(hype.kind));
+    render_ok("close call");
+
+    // every hype ends by itself within 2.5 s
+    steps(250);
+    expect(hype.kind == HYPE_NONE || hype.t <= 0.0f, "flow: hype", "hype %d still on after 2.5 s", int(hype.kind));
+    fresh_save();
+}
+
 // The tumbleweed hits only where it is drawn: a 16 px ball against the
 // runner's body, not half a lane either side of its centre.
 void flow_weed_hitbox() {
@@ -1443,6 +1537,10 @@ void flow_text_fit() {
         expect(w(it.name) <= 80, "flow: text fit", "style name '%s' is %d px", it.name, w(it.name));
     int dw = screen.measure_text(INTRO_LINE, outline_font).w;
     expect(dw <= SW - 4, "flow: text fit", "'%s' is %d px", INTRO_LINE, dw);
+    for(const char *h : {"NEW BEST!", "5000 CHILIS"}) {
+        int hw = screen.measure_text(h, outline_font).w;
+        expect(hw <= SW - 4, "flow: text fit", "hype '%s' is %d px", h, hw);
+    }
     char a[40], b[40];
     snprintf(a, sizeof(a), "%lu", 99999999ul);
     expect(3 + w(a) < SW - 47, "flow: text fit", "score %s runs into the heat bar", a);
@@ -1584,6 +1682,9 @@ const Scene scenes[] = {
     {"intro_turn3", [] { steps(25); }},
     {"cars_desert", [] { scene_cars(300.0f); }},
     {"cars_city", [] { scene_cars(1100.0f); }},
+    {"hype_best", [] { scene_run_at(400.0f, 100); hype = Hype{}; start_hype(HYPE_BEST, "NEW BEST!"); st_ghost = true; steps(45); st_ghost = false; }},
+    {"hype_chilis", [] { scene_run_at(1300.0f, 100); hype = Hype{}; start_hype(HYPE_CHILIS, "500 CHILIS"); st_ghost = true; steps(70); st_ghost = false; }},
+    {"hype_biome", [] { scene_run_at(880.0f, 100); hype = Hype{}; st_ghost = true; for(int i = 0; i < 3000 && !hype_active(HYPE_BIOME); i++) step(); steps(60); st_ghost = false; }},
     {"crash", [] { scene_run_at(150.0f, 100); save.missions[0] = {M_DISTANCE, 0, 0, 200}; crash_now(); steps(15); }},
     {"results", [] { steps(250); }},
     {"pause", [] { scene_run_at(1000.0f, 200); step(Button::MENU); }},
@@ -1686,6 +1787,7 @@ void flows() {
     flow_dust_at_feet();
     flow_alt_moves();
     flow_alt_jump_looks_different();
+    flow_hype();
     flow_weed_hitbox();
     flow_weed_settle();
     st_ghost = false;

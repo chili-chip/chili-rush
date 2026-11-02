@@ -455,6 +455,16 @@ void emit(float x, float y, float vx, float vy, float life, Pen pen, uint8_t siz
     }
 }
 
+// Big moments: a short burst of flames, hit markers and a bouncing line
+enum HypeKind : uint8_t { HYPE_NONE, HYPE_CLOSE, HYPE_BIOME, HYPE_CHILIS, HYPE_BEST };
+struct Hype {
+    HypeKind kind;
+    float t;  // seconds left
+    char text[16];
+};
+Hype hype;
+bool hype_active(HypeKind k) { return hype.kind == k && hype.t > 0.0f; }
+
 void burst(float x, float y, int n, Pen pen, float speed = 40.0f, uint8_t size = 1) {
     for(int i = 0; i < n; i++) {
         float a = rnd_float() * 6.2831f;
@@ -1014,6 +1024,38 @@ void finish_run_save() {
 }
 
 // ---------------------------------------------------------------------------
+// Hype: a short "wow" for big moments. A bigger moment replaces a smaller one
+// still playing; a smaller one waits its turn (it is simply skipped).
+float hype_length(HypeKind k) {
+    switch(k) {
+        case HYPE_CLOSE: return 0.7f;
+        case HYPE_BIOME: return 1.6f;
+        case HYPE_CHILIS: return 1.8f;
+        case HYPE_BEST: return 2.2f;
+        default: return 0.0f;
+    }
+}
+
+void start_hype(HypeKind k, const char *text) {
+    if(attract) return;
+    if(hype.t > 0.0f && hype.kind > k) return;
+    hype.kind = k;
+    hype.t = hype_length(k);
+    snprintf(hype.text, sizeof(hype.text), "%s", text);
+    if(k >= HYPE_BIOME) {
+        run.shake = std::max(run.shake, k == HYPE_BIOME ? 0.25f : 0.4f);
+        run.flash = std::max(run.flash, 0.18f);
+        run.flash_pen = Pen(255, 150, 40);
+    }
+    if(k == HYPE_BEST || k == HYPE_CHILIS) world_sfx(audio::Sfx::AIRHORN);
+}
+
+// chilis in one run that get a hype
+bool chili_milestone(uint32_t n) {
+    return n == 100 || n == 200 || n == 500 || n == 1000 || n == 2000 || n == 5000;
+}
+
+// ---------------------------------------------------------------------------
 // Update: one run step
 
 void collect(Obj &o) {
@@ -1023,6 +1065,11 @@ void collect(Obj &o) {
     switch(o.kind) {
         case K_CHILI: {
             run.chilis++;
+            if(chili_milestone(run.chilis)) {
+                char buf[16];
+                snprintf(buf, sizeof(buf), "%u CHILIS", unsigned(run.chilis));
+                start_hype(HYPE_CHILIS, buf);
+            }
             run.combo++;
             run.best_combo = std::max(run.best_combo, run.combo);
             run.heat = std::min(1.0f, run.heat + (dashing() ? 0.0f : 0.025f));
@@ -1207,6 +1254,7 @@ void update_objects() {
                     add_score(uint32_t(25 * multiplier()));
                     world_sfx(audio::Sfx::NEAR_MISS);
                     popup("CLOSE!", 64, 70, Pen(120, 230, 255));
+                    start_hype(HYPE_CLOSE, "");
                     run.heat = std::min(1.0f, run.heat + 0.06f);
                 }
             }
@@ -1352,6 +1400,7 @@ void update_run(bool input) {
     if(b != run.last_biome) {
         run.last_biome = b;
         run.biome_banner = 2.0f;
+        start_hype(HYPE_BIOME, "");
     }
     if(run.biome_banner > 0.0f) run.biome_banner -= DT;
 
@@ -1361,12 +1410,38 @@ void update_run(bool input) {
         if(!run.new_best && best_at_start > 0 && run.score > best_at_start) {
             run.new_best = true;
             world_sfx(audio::Sfx::NEW_BEST);
-            popup("NEW BEST!", 64, 46, Pen(255, 240, 120));
+            start_hype(HYPE_BEST, "NEW BEST!");
+        }
+    }
+}
+
+void update_hype() {
+    if(hype.t <= 0.0f) {
+        hype.kind = HYPE_NONE;
+        return;
+    }
+    float total = hype_length(hype.kind);
+    float age = total - hype.t;
+    hype.t -= DT;
+    if(hype.kind == HYPE_CLOSE) {
+        // sparks off the runner's shoulder
+        if(age < 0.25f)
+            emit(player_screen_x() + float(rnd_int(12) - 6), float(PLAYER_FEET_Y - 14), float(rnd_int(80) - 40),
+                 -40.0f - float(rnd_int(40)), 0.3f, rnd_int(2) ? Pen(255, 255, 255) : Pen(120, 230, 255));
+        return;
+    }
+    // embers flying up out of the flames
+    if(age < total * 0.7f) {
+        for(int i = 0; i < 3; i++) {
+            Pen pen = rnd_int(3) == 0 ? Pen(255, 240, 140) : rnd_int(2) ? Pen(255, 150, 30) : Pen(240, 60, 20);
+            emit(float(rnd_int(SW)), float(SH - 4), float(rnd_int(30) - 15), -90.0f - float(rnd_int(70)), 0.5f, pen,
+                 uint8_t(1 + rnd_int(2)));
         }
     }
 }
 
 void update_effects() {
+    update_hype();
     for(auto &p : particles) {
         if(p.life <= 0.0f) continue;
         p.life -= DT;
@@ -1916,6 +1991,61 @@ void render_hud(uint32_t time) {
     }
 }
 
+// A white "hit marker": four short diagonal strokes round a gap
+void hit_marker(int x, int y, int r) {
+    screen.pen = Pen(255, 255, 255);
+    for(int i = 2; i <= r; i++) {
+        screen.pixel(Point(x - i, y - i));
+        screen.pixel(Point(x + i, y - i));
+        screen.pixel(Point(x - i, y + i));
+        screen.pixel(Point(x + i, y + i));
+    }
+}
+
+void render_hype(uint32_t time) {
+    if(hype.t <= 0.0f || hype.kind == HYPE_NONE) return;
+    float total = hype_length(hype.kind);
+    float age = total - hype.t;
+    if(hype.kind == HYPE_CLOSE) {
+        if(age < 0.3f) hit_marker(int(player_screen_x()) + 9, PLAYER_FEET_Y - 18, 4);
+        return;
+    }
+    // a wall of flames rising from the bottom edge, up and back down
+    float env = sinf(clampf(age / total, 0.0f, 1.0f) * 3.14159265f);
+    for(int x = 0; x < SW; x++) {
+        uint32_t h1 = hash32(uint32_t(x / 3) * 7919u + (time / 70u));
+        float flick = float(h1 % 100u) / 100.0f;
+        int h = int(env * (12.0f + 14.0f * flick + 6.0f * sinf(float(x) * 0.31f + float(time) * 0.012f)));
+        if(h <= 0) continue;
+        int top = SH - h;
+        screen.pen = Pen(240, 50, 20, 210);
+        screen.v_span(Point(x, top), h);
+        if(h > 4) {
+            screen.pen = Pen(255, 150, 30, 220);
+            screen.v_span(Point(x, top + h / 4), h - h / 4);
+        }
+        if(h > 10) {
+            screen.pen = Pen(255, 235, 120, 230);
+            screen.v_span(Point(x, top + h / 2 + 2), h - h / 2 - 2);
+        }
+    }
+    // hit markers popping round the screen
+    if((hype.kind == HYPE_BEST || hype.kind == HYPE_CHILIS) && age < 1.0f) {
+        uint32_t beat = time / 120u;
+        for(int i = 0; i < 3; i++) {
+            uint32_t h = hash32(beat * 31u + uint32_t(i) * 977u);
+            hit_marker(16 + int(h % 96u), 30 + int((h >> 8) % 60u), 3 + int((h >> 16) % 3u));
+        }
+    }
+    // the line bounces in, then sits and flickers like fire
+    if(hype.text[0]) {
+        float in = clampf(age / 0.25f, 0.0f, 1.0f);
+        int y = 40 - int((1.0f - in) * 30.0f) + int(sinf(age * 18.0f) * 3.0f * (1.0f - clampf(age / 0.8f, 0.0f, 1.0f)));
+        static const Pen fire[3] = {Pen(255, 240, 120), Pen(255, 170, 40), Pen(255, 255, 255)};
+        text_shadow(hype.text, outline_font, Point(64, y), fire[(time / 90u) % 3u], TextAlign::top_center);
+    }
+}
+
 void render_popups() {
     for(auto &p : popups) {
         if(p.life <= 0.0f) continue;
@@ -2361,6 +2491,7 @@ void render(uint32_t time) {
     PROFILE(3);
     render_particles();
     if(state == State::RUN || (attract && state == State::TITLE)) render_speed_lines(time);
+    if(state == State::RUN || state == State::CRASH) render_hype(time);
 
     if(run.flash > 0.0f) {
         Pen p = run.flash_pen;
