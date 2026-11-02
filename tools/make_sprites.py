@@ -542,6 +542,30 @@ def jump_down_frame():
                      hands=[(0, 4, False), (14, 6, False)], tails="fall", phase=1.0)
 
 
+# Alternates that play now and then so jumps and slides do not look the same
+# every time: a star jump, and a knee slide with the arms spread.
+def jump_up_alt_frame():
+    # take-off with both arms punched straight up, legs together
+    return hero_back(T=4, H=17, W=8, legs=[(7, 0, False), (8, 0, False)],
+                     hands=[(3, 0, False), (11, 0, False)], tails="rise", phase=1.3,
+                     dust=[(2.0, 21.5, 1.4, "e"), (13.5, 21.5, 1.4, "w")])
+
+
+def jump_alt_frame():
+    # apex: spread-eagle star, arms and legs wide, both soles at us
+    return hero_back(T=5, H=14, W=10, legs=[(2, 0, True), (13, 0, True)],
+                     hands=[(0, 1, False), (14, 1, False)], tails="float", phase=0.7)
+
+
+def slide_alt_frame(alt=0):
+    """Knee slide: low on both knees, soles towards us, arms spread wide."""
+    hands = [(0, 15, False), (14, 14, False)] if alt == 0 else [(0, 14, False), (14, 15, False)]
+    dust = ([(1.0, 22.0, 1.6, "e"), (14.5, 21.5, 1.5, "w"), (8.0, 23.0, 1.0, "e")] if alt == 0 else
+            [(1.5, 21.5, 1.5, "w"), (14.0, 22.0, 1.7, "e"), (5.0, 23.0, 1.1, "e")])
+    return hero_back(T=10, H=11, W=11, legs=[(5, 0, True), (10, 0, True)], hands=hands,
+                     tails="rise", phase=0.3 + alt, curl=1.0, dust=dust)
+
+
 def land_frame():
     return hero_back(T=9, H=12, W=12, legs=[(3, 0, False), (12, 0, False)],
                      hands=[(0, 15, True), (14, 15, True)], tails="flop", curl=1.5,
@@ -1488,6 +1512,415 @@ def hud(name):
     return t
 
 
+
+# ================================================================ CARS
+# Parked cars facing the runner (BLOCK obstacles in the desert and the city).
+# Their headlight pixels use LAMP colours that the game switches on and off.
+LAMP = {"desert": [(255, 248, 214), (255, 214, 120)], "city": [(214, 246, 255), (130, 200, 255)]}
+LAMP_OFF = {"desert": [(96, 92, 104), (64, 60, 76)], "city": [(84, 92, 112), (52, 56, 76)]}
+
+
+def car_desert():
+    """A dusty old pickup truck, seen from the front."""
+    s = Spr(32, 28)
+    paint = [(244, 150, 72), (214, 104, 44), (150, 62, 30), (96, 38, 26)]  # light..dark
+    L = LAMP["desert"]
+    # cab roof and windshield (trapezoid)
+    s.poly([(8, 2), (24, 2), (27, 11), (5, 11)], paint[1])
+    s.rect(8, 2, 16, 1, paint[0])
+    s.poly([(9, 4), (23, 4), (25, 10), (7, 10)], "N")
+    s.line(10, 5, 12, 9, "C")      # glass glints
+    s.line(13, 5, 14, 7, "C")
+    s.rect(7, 9, 19, 1, "M")       # dashboard shadow
+    s.rect(15, 4, 2, 6, "M")       # mirror / centre pillar
+    s.px(15, 5, "x")
+    # hood
+    s.poly([(3, 12), (29, 12), (30, 17), (2, 17)], paint[1])
+    s.rect(4, 12, 24, 1, paint[0])
+    s.rect(10, 13, 12, 3, paint[0])  # bulge
+    s.rect(10, 15, 12, 1, paint[2])
+    s.rect(2, 16, 28, 1, paint[2])
+    # grille and lamps row
+    s.rect(1, 17, 30, 5, paint[2])
+    s.rect(9, 17, 14, 5, "z")
+    for x in range(10, 22, 2):
+        s.rect(x, 18, 1, 3, "x")
+    s.rect(9, 17, 14, 1, "e")
+    for cx in (5, 26):            # round headlights with a chrome ring
+        s.ellipse(cx, 19.5, 2.6, 2.6, "e")
+        s.ellipse(cx, 19.5, 1.8, 1.8, L[1])
+        s.px(cx - 1, 19, L[0])
+        s.px(cx, 19, L[0])
+        s.px(cx - 1, 18, L[0])
+    # chrome bumper
+    s.rect(0, 22, 32, 2, "e")
+    s.rect(0, 23, 32, 1, "x")
+    s.rect(13, 22, 6, 1, "w")      # plate
+    s.rect(14, 22, 4, 2, "Y")
+    # tyres
+    for x0 in (2, 24):
+        s.rect(x0, 24, 6, 4, "4")
+        s.rect(x0, 24, 6, 1, "3")
+    # dust and rust on the paint
+    for (x, y) in [(4, 14), (27, 15), (6, 13), (25, 13), (3, 20), (29, 21)]:
+        s.px(x, y, paint[3])
+    s.outline()
+    return s
+
+
+def car_city():
+    """A low neon street racer with an underglow, seen from the front."""
+    s = Spr(32, 28)
+    paint = [(196, 120, 255), (140, 64, 216), (92, 34, 160), (54, 20, 100)]
+    L = LAMP["city"]
+    # low roof and wide windshield
+    s.poly([(9, 6), (23, 6), (27, 13), (5, 13)], paint[2])
+    s.rect(9, 6, 14, 1, paint[0])
+    s.poly([(10, 7), (22, 7), (25, 12), (7, 12)], "M")
+    s.line(11, 8, 13, 11, "c")
+    s.line(19, 8, 20, 9, "C")
+    # wing mirrors
+    s.rect(3, 11, 3, 2, paint[1])
+    s.rect(26, 11, 3, 2, paint[1])
+    # body: wide, low, sharp
+    s.poly([(2, 13), (30, 13), (31, 21), (1, 21)], paint[1])
+    s.rect(3, 13, 26, 1, paint[0])
+    s.line(6, 14, 13, 17, paint[0])   # hood creases
+    s.line(25, 14, 18, 17, paint[0])
+    s.rect(13, 15, 6, 1, paint[2])
+    # slim LED headlight strips
+    for x0, x1 in ((2, 9), (22, 29)):
+        s.rect(x0, 17, x1 - x0 + 1, 2, L[1])
+        s.rect(x0 + 1, 17, x1 - x0 - 1, 1, L[0])
+    s.rect(10, 18, 12, 3, "4")        # air intake
+    for x in range(11, 21, 2):
+        s.px(x, 19, paint[2])
+    s.rect(1, 20, 30, 1, paint[3])
+    # splitter and neon underglow
+    s.rect(0, 21, 32, 1, "z")
+    s.rect(1, 22, 30, 1, "i")
+    s.rect(3, 23, 26, 1, "I")
+    # tyres
+    for x0 in (2, 25):
+        s.rect(x0, 22, 5, 5, "4")
+        s.rect(x0, 22, 5, 1, "3")
+    s.px(16, 13, "c")                 # roof antenna light
+    s.outline()
+    return s
+
+
+# ================================================================ INTRO
+# The hero for the start-of-run camera move, drawn at twice the detail
+# (32x48) because the camera starts in a close-up: facing us, three
+# quarters, side and three quarters from behind (run[0] is the back view).
+# The shades it puts on are separate 32x16 sprites drawn over the eyes.
+
+BIG_T = 10        # top row of the pod
+SHADES_Y = 17     # shades' top row in the 32x48 frame
+
+
+def big_body(s, view):
+    """Pod with bandana and stalk; returns {row: (l, r)}."""
+    W = {"front": 21, "q1": 19, "side": 15, "q3": 18}[view]
+    cx = {"front": 16.0, "q1": 16.5, "side": 16.0, "q3": 15.5}[view]
+    T, H = BIG_T, 32
+    rows = {}
+    for i in range(H):
+        v = i / (H - 1)
+        f = 0.62 if v < 0.03 else 0.84 if v < 0.06 else 0.95 if v < 0.1 else 1.0 if v <= 0.36 else \
+            1 - 0.95 * ((v - 0.36) / 0.64) ** 1.15
+        off = 5.0 * ((v - 0.5) / 0.5) ** 2.2 if v > 0.5 else 0.0
+        half = W / 2 * f
+        l = rnd_half(cx - half + off)
+        r = max(l, rnd_half(cx + half + off) - 1)
+        rows[T + i] = (l, r)
+        for x in range(l, r + 1):
+            rel = (x - l) / max(1, r - l)
+            if v > 0.88:
+                c = "d" if x >= r - 1 or v > 0.95 else "r"
+            elif rel < 0.1 and v < 0.84:
+                c = "h"
+            elif rel > 0.8 or (v > 0.62 and rel > 0.6):
+                c = "r"
+            else:
+                c = "R"
+            if x >= r and 0.12 < v < 0.84:
+                c = "d"
+            s.px(x, T + i, c)
+    # gloss: a long streak and a dot
+    for i in range(H):
+        v = i / (H - 1)
+        l, r = rows[T + i]
+        if 0.16 <= v <= 0.6 and r - l >= 5:
+            s.px(l + 2, T + i, "W" if v < 0.42 else "h")
+            if v < 0.3:
+                s.px(l + 3, T + i, "h")
+    # calyx: green cap with lobes hanging over the shoulders
+    l, r = rows[T]
+    for x in range(l - 1, r + 2):
+        s.px(x, T, "G")
+        s.px(x, T + 1, "g" if x in (l - 1, r + 1) else "G")
+    s.px(l, T, "l")
+    s.px(l + 1, T, "l")
+    for x in range(l, r + 1, 4):
+        s.px(x + 1, T + 2, "g")
+    # thick stalk curling up and to the right (the quiff) with a leaf
+    stalk = [(15, T - 1), (16, T - 1), (16, T - 2), (17, T - 2), (17, T - 3), (18, T - 3),
+             (18, T - 4), (19, T - 4), (19, T - 5), (20, T - 5), (21, T - 6), (21, T - 5)]
+    for (x, y) in stalk:
+        s.px(x, y, "G")
+    for (x, y) in [(16, T - 2), (17, T - 3), (18, T - 4), (20, T - 6)]:
+        s.px(x, y, "l")
+    s.poly([(9, T - 2), (12, T - 6), (15, T - 4), (14, T - 1)], "G")
+    s.line(10, T - 3, 13, T - 5, "l")
+    # bandana: white with red dots, wrapped round the top of the pod
+    for y in range(T + 3, T + 7):
+        l, r = rows[y]
+        for x in range(l, r + 1):
+            c = "w"
+            if x >= r - 1:
+                c = "e"
+            if ((x // 2) + (y // 2)) % 3 == 0 and (x % 2 == 0) and (y % 2 == 0) and l + 1 < x < r - 1:
+                c = "R"
+            s.px(x, y, c)
+        s.px(l, y, "e") if y == T + 6 else None
+    return rows
+
+
+def big_eye(s, x, y, look=0, narrow=False):
+    """Big eye: white, dark iris, two glints. look shifts the pupil."""
+    if narrow:
+        s.grid([".ww.", "wwww", "wwkk", "wkkk", "wkkk", ".wk."], x, y)
+        return
+    s.grid([".www.", "wwwww", "wwwww", "wwwww", "wwwww", ".www."], x, y)
+    s.rect(x + 1 + look, y + 2, 3, 3, "k")
+    s.px(x + 1 + look, y + 2, "w")
+    s.px(x + 3 + look, y + 4, "x")
+
+
+def big_limbs(s, rows, view):
+    T = BIG_T
+    arm_y = T + 12
+    l, r = rows[arm_y]
+    hands = {"front": [(2, 33), (28, 33)], "q1": [(4, 32), (27, 34)],
+             "side": [(10, 33), (21, 33)], "q3": [(4, 34), (27, 32)]}[view]
+    feet = {"front": (11, 20), "q1": (12, 21), "side": (13, 18), "q3": (12, 20)}[view]
+    lay = Spr(32, 48)
+    for i, (hx, hy) in enumerate(hands):
+        sx = l + 2 if i == 0 else r - 2
+        for d in (0, 1):
+            lay.line(sx + d, arm_y, hx + d, hy, "G")
+        lay.rect(hx - 1, hy, 4, 3, "w")
+        lay.rect(hx - 1, hy + 2, 4, 1, "e")
+    hips = (13, 19)
+    for ax, hip in zip(feet, hips):
+        for d in (0, 1):
+            lay.line(hip + d, T + 29, ax + d, 43, "G")
+        # sneaker: teal upper, white toe and sole
+        lay.rect(ax - 2, 43, 6, 2, "T")
+        lay.rect(ax - 2, 43, 6, 1, "c")
+        lay.rect(ax - 2, 45, 6, 2, "w")
+        lay.rect(ax - 2, 46, 6, 1, "e")
+        lay.px(ax, 44, "w")
+    lay.outline()
+    return lay
+
+
+def hero_big(view):
+    s = Spr(32, 48)
+    body = Spr(32, 48)
+    rows = big_body(body, view)
+    T = BIG_T
+    ey = T + 8
+    if view == "front":
+        big_eye(body, 9, ey, look=1)
+        big_eye(body, 18, ey, look=0)
+        # brows: cocky tilt
+        body.line(9, ey - 2, 13, ey - 1, "k")
+        body.line(18, ey - 1, 22, ey - 2, "k")
+        # grin with teeth, lopsided
+        body.grid(["k.......k", ".kwwwwwk.", "..kkkkk.."], 12, ey + 8)
+        body.px(9, ey + 7, "P")
+        body.px(10, ey + 7, "P")
+        body.px(23, ey + 7, "P")
+        body.px(24, ey + 7, "P")
+    elif view == "q1":
+        big_eye(body, 13, ey, look=1)
+        big_eye(body, 21, ey, narrow=True)
+        body.line(13, ey - 1, 17, ey - 2, "k")
+        body.grid(["k......", ".kwwwk.", "..kkkk."], 16, ey + 8)
+        body.px(24, ey + 7, "P")
+    elif view == "side":
+        big_eye(body, 19, ey, narrow=True)
+        body.grid(["kk.", ".kk"], 21, ey + 8)
+        # bandana knot and its two tails at the back
+        body.rect(8, T + 3, 3, 4, "e")
+        body.px(8, T + 3, "w")
+    else:  # q3
+        body.rect(13, T + 3, 3, 4, "e")
+        body.px(13, T + 3, "w")
+    body.outline()
+    tails = Spr(32, 48)
+    kx = {"front": None, "q1": 9, "side": 8, "q3": 14}[view]
+    if kx is not None:
+        for (ang, ln, bend) in [(200, 8.0, -1.5), (230, 7.0, 1.2)]:
+            tail(tails, kx, T + 5, ang, ln, bend)
+        tails.outline()
+    limbs = big_limbs(s, rows, view)
+    for lay in (tails, limbs, body) if view != "q3" else (tails, body, limbs):
+        s.over(lay)
+    return s
+
+
+def shades_big(view):
+    """Blocky pixel shades, 32x16; top row sits on the frame's row SHADES_Y."""
+    s = Spr(32, 16)
+    if view == "front":
+        s.grid([
+            "......kkkkkkkkkkkkkkkkkkkk......",
+            "......kkkkkkkkkkkkkkkkkkkk......",
+            ".......kkwwkkkk..kkwwkkkk.......",
+            ".......kkkwwkkk..kkkwwkkk.......",
+            "........kkkkkk....kkkkkk........",
+            ".........kkkk......kkkk.........",
+        ], 0, 1)
+    elif view == "q1":
+        s.grid([
+            "........kkkkkkkkkkkkkkkkkk......",
+            "........kkkkkkkkkkkkkkkkkk......",
+            ".........kkkwwkkkk..kkwkk.......",
+            "..........kkkwwkkk..kkkk........",
+            "...........kkkkkk...kkk.........",
+            "............kkkk................",
+        ], 0, 1)
+    else:  # side
+        s.grid([
+            "....kkkkkkkkkkkkkkkkkkkkk.......",
+            "...............kkkkkkkkkk.......",
+            "................kkkwwkkk........",
+            ".................kkkkkk.........",
+            "..................kkkk..........",
+        ], 0, 1)
+    return s
+
+
+# ================================================================ PAINT
+# The STYLE menu repaints obstacles by changing palette entries at run time.
+# Every chromatic colour of a paintable obstacle is nudged by a step or two
+# (invisible on the 16-bit screen) so it is unique to that obstacle in the
+# sheet; then each variant is a hue turn of those colours. paint.hpp lists
+# them for the game.
+import colorsys
+
+# (menu name, sprite name, three variants as (hue turn in degrees, saturation x))
+PAINT_ITEMS = [
+    ("FENCE", "fence", [(200, 1.4), (300, 1.4), (100, 1.3)]),
+    ("FOOD CART", "cart", [(150, 1.0), (60, 1.0), (260, 1.0)]),
+    ("LAVA ROCK", "barrier", [(190, 1.0), (100, 1.0), (280, 1.0)]),
+    ("BANNER", "banner", [(120, 1.0), (240, 1.0), (60, 0.6)]),
+    ("NEON SIGN", "banner_city", [(120, 1.0), (200, 1.0), (60, 1.0)]),
+    ("STONE ARCH", "banner_lava", [(190, 1.0), (100, 1.0), (280, 1.0)]),
+    ("PICKUP", "car_desert", [(190, 1.0), (100, 0.9), (320, 1.0)]),
+    ("RACER", "car_city", [(110, 1.0), (180, 1.0), (60, 1.0)]),
+    ("SPIRE", "spire", [(190, 1.0), (100, 1.0), (280, 1.0)]),
+    ("TUMBLEWEED", "weed", [(200, 1.6), (90, 1.6), (300, 1.6)]),
+]
+NEUTRAL = {col(c) for c in ("k", "w", "e", "x", "z")}
+
+
+def chromatic(c):
+    r, g, b = (v / 255 for v in c)
+    h, l, sat = colorsys.rgb_to_hls(r, g, b)
+    return c not in NEUTRAL and sat > 0.12 and 0.06 < l < 0.97
+
+
+def turn(c, deg, smul):
+    r, g, b = (v / 255 for v in c)
+    h, l, sat = colorsys.rgb_to_hls(r, g, b)
+    r, g, b = colorsys.hls_to_rgb((h + deg / 360) % 1.0, l, min(1.0, sat * smul))
+    return (int(round(r * 255)), int(round(g * 255)), int(round(b * 255)))
+
+
+def arts_of(v):
+    return v if isinstance(v, list) else [v]
+
+
+def apply_paint(sprites):
+    """Make each paintable obstacle's chromatic colours unique to it.
+    Returns [(name, [original colours], [[variant colours] x 3])]."""
+    lamps = {c for v in LAMP.values() for c in v}
+    paint_names = {n for _, n, _ in PAINT_ITEMS}
+    used = set()
+    for name, v in sprites.items():
+        if name in paint_names:
+            continue
+        for a in arts_of(v):
+            for row in a.p:
+                used.update(c for c in row if c is not None)
+    used |= lamps
+    table = []
+    for menu, name, variants in PAINT_ITEMS:
+        arts = arts_of(sprites[name])
+        colours = sorted({c for a in arts for row in a.p for c in row
+                          if c is not None and c not in lamps and chromatic(c)})
+        remap = {}
+        for c in colours:
+            for d in range(1, 64):
+                n = (c[0] ^ (d & 3), c[1] ^ ((d >> 2) & 3), c[2] ^ ((d >> 4) & 3))
+                if n not in used:
+                    break
+            else:
+                sys.exit("no unique colour for %s %s" % (name, c))
+            used.add(n)
+            remap[c] = n
+        for a in arts:
+            for row in a.p:
+                for i, c in enumerate(row):
+                    if c in remap:
+                        row[i] = remap[c]
+        orig = [remap[c] for c in colours]
+        table.append((menu, name, orig, [[turn(c, d, m) for c in orig] for d, m in variants]))
+    return table
+
+
+def write_paint_hpp(table, path):
+    n = max(len(o) for _, _, o, _ in table)
+    hexs = lambda cs: ", ".join("0x%06x" % (r << 16 | g << 8 | b) for r, g, b in cs + [(0, 0, 0)] * (n - len(cs)))
+    out = ["#pragma once",
+           "// Generated by tools/make_sprites.py: the obstacle colours the STYLE menu",
+           "// changes. Variant 0 is the original; each colour here is unique to its",
+           "// obstacle in assets/sprites.png, so changing its palette entry repaints",
+           "// only that obstacle.",
+           "#include <cstdint>",
+           "",
+           "namespace paint {",
+           "constexpr int ITEMS = %d;" % len(table),
+           "constexpr int VARIANTS = 4;",
+           "constexpr int MAX_COLOURS = %d;" % n,
+           "",
+           "struct Item {",
+           "    const char *name;",
+           "    int count;",
+           "    uint32_t rgb[VARIANTS][MAX_COLOURS];",
+           "};",
+           "",
+           "const Item items[ITEMS] = {"]
+    for menu, name, orig, vs in table:
+        out.append('    {"%s", %d, {  // %s' % (menu, len(orig), name))
+        for cs in [orig] + vs:
+            out.append("        {%s}," % hexs(cs))
+        out.append("    }},")
+    out.append("};")
+    out.append("")
+    out.append("// Headlights: two colours each, on and off.")
+    for car in ("desert", "city"):
+        for state, src in (("on", LAMP), ("off", LAMP_OFF)):
+            out.append("constexpr uint32_t lamp_%s_%s[2] = {%s};" % (car, state, ", ".join(
+                "0x%06x" % (r << 16 | g << 8 | b) for r, g, b in src[car])))
+    out.append("}  // namespace paint")
+    open(path, "w").write("\n".join(out) + "\n")
+
+
 # ================================================================ SHEET
 def parse_rects(path):
     rects = {}
@@ -1502,10 +1935,16 @@ def parse_rects(path):
     return size, rects
 
 
-BOTTOM_ANCHORED = {"run", "jump", "jump_up", "jump_down", "land", "slide2", "slide", "dash", "hurt", "fence", "banner",
+BOTTOM_ANCHORED = {"run", "jump", "jump_up", "jump_down", "land", "slide2", "slide", "dash", "hurt",
+                   "jump_up_alt", "jump_alt", "slide_alt", "fence", "banner",
                    "cactus", "weed", "cart", "barrier", "vending", "spire",
                    "banner_city", "banner_lava", "agave", "rock", "skull",
-                   "sign", "lamp", "tower", "pillar", "vent"}
+                   "sign", "lamp", "tower", "pillar", "vent", "car_desert", "car_city",
+                   "intro_front", "intro_q1", "intro_side", "intro_q3"}
+
+
+# the body is centred; the bandana tails stream out behind it
+OFF_CENTRE = {"intro_side"}
 
 
 def build_sprites():
@@ -1517,6 +1956,9 @@ def build_sprites():
         "land": land_frame(),
         "slide": slide_frame(0),
         "slide2": slide_frame(1),
+        "jump_up_alt": jump_up_alt_frame(),
+        "jump_alt": jump_alt_frame(),
+        "slide_alt": [slide_alt_frame(0), slide_alt_frame(1)],
         "dash": dash_frames(),
         "hurt": hurt_frame(),
         "fence": fence(),
@@ -1547,12 +1989,23 @@ def build_sprites():
         "hud_flame": hud("flame"),
         "hud_magnet": hud("magnet"),
         "hud_star": hud("star"),
+        "car_desert": car_desert(),
+        "car_city": car_city(),
+        "intro_front": hero_big("front"),
+        "intro_q1": hero_big("q1"),
+        "intro_side": hero_big("side"),
+        "intro_q3": hero_big("q3"),
+        "shades_front": shades_big("front"),
+        "shades_q1": shades_big("q1"),
+        "shades_side": shades_big("side"),
     }
 
 
 def make_sheet():
     size, rects = parse_rects(os.path.join(ROOT, "sprites.hpp"))
     sprites = build_sprites()
+    table = apply_paint(sprites)
+    write_paint_hpp(table, os.path.join(ROOT, "paint.hpp"))
     sheet = Image.new("RGBA", size, (0, 0, 0, 0))
     placed = []
     for name, r in rects.items():
@@ -1595,7 +2048,7 @@ def verify(sheet, placed):
         bottom = [i for i in range(x, x + w) if px[i, y + h - 1][3]]
         if not bottom:
             problems.append("%s: bottom row empty" % name)
-        if xs:
+        if xs and name not in OFF_CENTRE:
             c = (min(xs) + max(xs) + 1) / 2 - x
             if abs(c - w / 2) > 1.0:
                 problems.append("%s: not centred (%.1f vs %.1f)" % (name, c, w / 2))

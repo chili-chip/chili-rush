@@ -775,6 +775,8 @@ void expect(bool ok, const char *key, const char *fmt, ...) {
 void fresh_save() {
     files.clear();
     reset_save();
+    reset_style();
+    apply_style();
     save.seen_help = 1;
     store_game();
 }
@@ -1072,8 +1074,225 @@ void flow_readability() {
            "a fence %.2f s away at top speed is %.1f x %.1f px (want 7 x 3.5)", double(react), double(w), double(h));
 }
 
+
+// --- v1.2: cars, the STYLE menu and the start-of-run camera move ---------
+
+bool same_rect(const Rect &a, const Rect &b) { return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h; }
+
+// Cars replace the cactus and the vending machine on the road; their
+// headlights are off, dipped, on full beam or flashing, fixed per car.
+void flow_cars() {
+    expect(same_rect(obstacle_rect(K_BLOCK, 0, 0), spr::car_desert), "flow: cars", "desert BLOCK is not the pickup");
+    expect(same_rect(obstacle_rect(K_BLOCK, 1, 0), spr::car_city), "flow: cars", "city BLOCK is not the racer");
+    expect(same_rect(obstacle_rect(K_BLOCK, 2, 0), spr::spire), "flow: cars", "volcano BLOCK is not the spire");
+    int count[LIGHT_MODES] = {0};
+    bool stable = true;
+    for(int i = 0; i < 4000; i++) {
+        float s = 10.0f + float(i) * 3.7f;
+        int m = light_mode(s);
+        stable &= m == light_mode(s);
+        if(m >= 0 && m < LIGHT_MODES) count[m]++;
+    }
+    bool all = true;
+    for(int m = 0; m < LIGHT_MODES; m++) all &= count[m] > 200;
+    expect(all && stable, "flow: headlights", "modes off %d dipped %d full %d flashing %d of 4000, stable %d", count[0],
+           count[1], count[2], count[3], stable);
+    // a spawned car keeps its mode in o.art
+    fresh_save();
+    to_running();
+    int cars = 0, right = 0;
+    for(int i = 0; i < 3000 && cars < 20; i++) {
+        step();
+        for(auto &o : objs)
+            if(o.kind == K_BLOCK && o.biome < 2 && !o.done) {
+                cars++;
+                right += o.art == light_mode(o.s);
+                o.done = true;
+            }
+    }
+    expect(cars > 0 && right == cars, "flow: headlights", "%d of %d cars carry their light mode", right, cars);
+    // rendering a lit car leaves the global alpha at 255
+    ::render(clock_ms);
+    expect(screen.alpha == 255, "flow: headlights", "alpha left at %d after drawing", int(screen.alpha));
+}
+
+// Every paintable colour is one palette entry of the sprite sheet, and
+// changing a style touches that obstacle's entries and nothing else.
+void flow_style_paint() {
+    Surface *sh = screen.sprites;
+    expect(sh && sh->palette, "flow: style palette", "sprite sheet is not paletted");
+    if(!sh || !sh->palette) return;
+    reset_style();
+    apply_style();
+    Pen before[256];
+    memcpy(before, sh->palette, sizeof(before));
+    for(int item = 0; item < paint::ITEMS; item++) {
+        for(int v = 1; v < paint::VARIANTS; v++) {
+            style.v[item] = uint8_t(v);
+            apply_style();
+            const auto &it = paint::items[item];
+            bool ok = true;
+            for(int k = 0; k < it.count; k++) {
+                uint32_t c = it.rgb[v][k];
+                Pen p = sh->palette[paint_slot[item][k]];
+                ok &= p.r == ((c >> 16) & 255) && p.g == ((c >> 8) & 255) && p.b == (c & 255) && p.a == 255;
+            }
+            int others = 0;
+            for(int i = 0; i < 256; i++) {
+                bool mine = false;
+                for(int k = 0; k < it.count; k++) mine |= paint_slot[item][k] == i;
+                if(!mine && memcmp(&sh->palette[i], &before[i], sizeof(Pen)) != 0) others++;
+            }
+            expect(ok && others == 0, "flow: style palette", "%s variant %d: own colours %s, %d other entries changed",
+                   it.name, v, ok ? "ok" : "wrong", others);
+        }
+        style.v[item] = 0;
+        apply_style();
+    }
+    expect(memcmp(before, sh->palette, sizeof(before)) == 0, "flow: style palette", "variant 0 does not restore the sheet");
+}
+
+// The STYLE menu: from the title, up/down picks an obstacle, left/right its
+// colour; the choice is saved and survives a restart; bad values reset.
+void flow_style_menu() {
+    fresh_save();
+    to_title();
+    steps(5);
+    step(Button::DPAD_DOWN);
+    step(Button::DPAD_DOWN);
+    step(Button::A);
+    expect(state == State::STYLE, "flow: style menu", "title item 3 did not open STYLE (state %d)", int(state));
+    step(Button::DPAD_DOWN);  // second item
+    step(Button::DPAD_RIGHT);
+    step(Button::DPAD_RIGHT);
+    step(Button::DPAD_DOWN);  // third item
+    step(Button::DPAD_LEFT);  // wraps to 3
+    expect(style.v[1] == 2 && style.v[2] == 3 && style.v[0] == 0, "flow: style menu", "styles %d %d %d (want 0 2 3)",
+           style.v[0], style.v[1], style.v[2]);
+    step(Button::B);
+    expect(state == State::TITLE && menu_cursor == 2, "flow: style menu", "B did not return to the title on STYLE");
+    memset(&style, 0, sizeof(style));
+    load_game();
+    expect(style.v[1] == 2 && style.v[2] == 3, "flow: style saved", "after reload %d %d (want 2 3)", style.v[1], style.v[2]);
+    style.v[4] = 9;
+    store_style();
+    load_game();
+    expect(style.v[4] == 0 && style.v[1] == 2, "flow: style repair", "a bad style kept (%d) or good ones lost", style.v[4]);
+    files.erase("save1");
+    load_game();
+    bool zero = true;
+    for(auto v : style.v) zero &= v == 0;
+    expect(zero && save.seen_help == 1, "flow: style missing", "no style file must mean the original colours");
+    fresh_save();
+    apply_style();
+}
+
+// The start-of-run camera move: PLAY on the title plays it, any button
+// skips it, it ends in the countdown, and restarts go straight to it.
+void flow_intro() {
+    fresh_save();
+    to_title();
+    steps(5);
+    step(Button::A);
+    expect(state == State::INTRO, "flow: intro", "PLAY did not start the intro (state %d)", int(state));
+    float d0 = run.distance;
+    int n = 0;
+    bool alpha_ok = true;
+    while(state == State::INTRO && n < 1000) {
+        step();
+        ::render(clock_ms);
+        alpha_ok &= screen.alpha == 255 && finite_all();
+        n++;
+    }
+    expect(state == State::READY && n == INTRO_TICKS, "flow: intro", "intro took %d updates, then state %d (want %d, READY)", n,
+           int(state), INTRO_TICKS);
+    expect(run.distance == d0 && alpha_ok, "flow: intro", "the run moved during the intro or drawing left alpha/NaN");
+    // skip
+    to_title();
+    steps(5);
+    step(Button::A);
+    steps(10);
+    step(Button::A);
+    expect(state == State::READY, "flow: intro skip", "A did not skip the intro (state %d)", int(state));
+    // a restart from the results screen goes straight to the countdown
+    to_running();
+    crash_now();
+    steps(200);
+    step(Button::A);
+    expect(state == State::READY, "flow: intro restart", "restart went to state %d, not READY", int(state));
+    fresh_save();
+}
+
+// Dust from the shoes, landing puffs and dash flames start at the runner's
+// feet in every lane, not at the middle of the screen (the camera follows
+// the runner only part of the way, so side lanes sit off centre).
+void flow_dust_at_feet() {
+    for(int lane_dir : {-1, 1}) {
+        fresh_save();
+        to_running();
+        st_ghost = true;  // nothing may end the run while we watch the feet
+        step(lane_dir < 0 ? Button::DPAD_LEFT : Button::DPAD_RIGHT);
+        steps(60);
+        float feet = player_screen_x();
+        int far = 0, seen = 0;
+        for(int i = 0; i < 300; i++) {
+            for(auto &p : particles) p.life = 0.0f;
+            st_ghost = true;
+            step(i == 100 ? Button::A : 0);  // a jump gives a landing puff too
+            for(auto &p : particles) {
+                if(p.life <= 0.0f) continue;
+                seen++;
+                if(fabsf(p.x - feet) > 7.0f) far++;
+            }
+            feet = player_screen_x();
+        }
+        expect(seen > 10 && far == 0 && fabsf(feet - 64.0f) > 4.0f, "flow: dust at feet",
+               "lane %+d: %d of %d particles away from the feet at x %.0f", lane_dir, far, seen, double(feet));
+    }
+    st_ghost = false;
+    fresh_save();
+}
+
+// Jumps and slides sometimes use their alternate animation (star jump,
+// knee slide), never always and never never.
+void flow_alt_moves() {
+    fresh_save();
+    to_running();
+    int jumps = 0, jump_alts = 0, slides = 0, slide_alts = 0;
+    for(int k = 0; k < 80; k++) {
+        st_ghost = true;
+        bool jump = k % 2 == 0;
+        step(jump ? Button::A : Button::B);
+        bool alt = false, normal = false;
+        for(int i = 0; i < 70; i++) {
+            st_ghost = true;
+            const Rect *r = player_frame(clock_ms);
+            if(jump) {
+                alt |= r == &spr::jump_up_alt || r == &spr::jump_alt;
+                normal |= r == &spr::jump_up || r == &spr::jump;
+            } else {
+                alt |= r == &spr::slide_alt[0] || r == &spr::slide_alt[1];
+                normal |= r == &spr::slide || r == &spr::slide2;
+            }
+            step();
+        }
+        if(alt == normal) continue;  // not a clean jump or slide (both or neither shown)
+        if(jump) { jumps++; jump_alts += alt; }
+        else { slides++; slide_alts += alt; }
+    }
+    expect(jumps > 30 && slides > 30 && jump_alts * 6 > jumps && jump_alts * 2 < jumps && slide_alts * 6 > slides &&
+               slide_alts * 2 < slides,
+           "flow: alternate moves", "star jumps %d of %d, knee slides %d of %d", jump_alts, jumps, slide_alts, slides);
+    st_ghost = false;
+    fresh_save();
+}
+
 void flow_text_fit() {
     auto w = [](const char *s) { return screen.measure_text(s, minimal_font).w; };
+    for(auto &it : paint::items)
+        expect(w(it.name) <= 80, "flow: text fit", "style name '%s' is %d px", it.name, w(it.name));
+    int dw = screen.measure_text(INTRO_LINE, outline_font).w;
+    expect(dw <= SW - 4, "flow: text fit", "'%s' is %d px", INTRO_LINE, dw);
     char a[40], b[40];
     snprintf(a, sizeof(a), "%lu", 99999999ul);
     expect(3 + w(a) < SW - 47, "flow: text fit", "score %s runs into the heat bar", a);
@@ -1162,6 +1381,21 @@ void scene_run_at(float d, int updates) {
     steps(updates);
 }
 
+// Three parked cars at fixed distances: full beam, dipped and off.
+void scene_cars(float d) {
+    scene_run_at(d, 1);
+    for(auto &o : objs) o = Obj{};
+    struct { int lane; float ahead; uint8_t mode; } cars[3] = {{0, 10.0f, LIGHT_FULL}, {2, 15.0f, LIGHT_DIPPED}, {1, 20.0f, LIGHT_OFF}};
+    for(auto &c : cars) {
+        Obj *o = spawn(K_BLOCK, lane_x(c.lane), run.distance + c.ahead);
+        if(o) o->art = c.mode;
+    }
+    for(int i = 0; i < 40; i++) {
+        st_ghost = true;
+        step();
+    }
+}
+
 const Scene scenes[] = {
     {"title", [] { fresh_save(); save.best = 12345; save.missions_done = 7; clock_ms = 9000; to_title(); steps(300); }},
     {"help", [] { set_state(State::HELP); }},
@@ -1190,6 +1424,16 @@ const Scene scenes[] = {
          popup("CLOSE!", 64, 70, Pen(120, 230, 255));
          steps(10);
      }},
+    {"style", [] { fresh_save(); style_item = 6; style.v[6] = 1; apply_style(); set_state(State::STYLE); steps(30); }},
+    {"style_racer", [] { style_item = 7; style.v[7] = 3; apply_style(); steps(10); }},
+    {"intro_close", [] { style.v[6] = 0; style.v[7] = 0; apply_style(); to_title(); steps(5); step(Button::A); steps(60); }},
+    {"intro_shades", [] { steps(INTRO_HIT - 60 - 20); }},
+    {"intro_deal", [] { steps(30); }},
+    {"intro_turn1", [] { steps(INTRO_ORBIT - INTRO_HIT - 10 + 45); }},
+    {"intro_turn2", [] { steps(25); }},
+    {"intro_turn3", [] { steps(25); }},
+    {"cars_desert", [] { scene_cars(300.0f); }},
+    {"cars_city", [] { scene_cars(1100.0f); }},
     {"crash", [] { scene_run_at(150.0f, 100); save.missions[0] = {M_DISTANCE, 0, 0, 200}; crash_now(); steps(15); }},
     {"results", [] { steps(250); }},
     {"pause", [] { scene_run_at(1000.0f, 200); step(Button::MENU); }},
@@ -1249,8 +1493,16 @@ void render_scenes(const char *dir, bool bench) {
 
 // --clip DIR: a run from `d` metres, one image per drawn frame (every 20 ms),
 // to compare how the road reads in motion. The runner cannot crash here.
+// A negative `d` starts from the title instead: the intro, then the run.
 void render_clip(const char *dir, float d, int frames) {
-    scene_run_at(d, 1);
+    if(d < 0.0f) {
+        fresh_save();
+        to_title();
+        steps(5);
+        step(Button::A);
+    } else {
+        scene_run_at(d, 1);
+    }
     for(int i = 0; i < frames; i++) {
         st_ghost = true;
         steps(2);
@@ -1277,6 +1529,12 @@ void flows() {
     flow_fast_fall();
     flow_text_fit();
     flow_readability();
+    flow_cars();
+    flow_style_paint();
+    flow_style_menu();
+    flow_intro();
+    flow_dust_at_feet();
+    flow_alt_moves();
     st_ghost = false;
     fresh_save();
 }
@@ -1375,7 +1633,7 @@ int chili_selftest(int argc, char **argv) {
     ::init();
     save.seen_help = 1;
     if(clip_dir) {
-        st::render_clip(clip_dir, clip_from, 250);
+        st::render_clip(clip_dir, clip_from, clip_from < 0.0f ? 400 : 250);
         return 0;
     }
     if(frames_dir || bench) {

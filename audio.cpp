@@ -758,6 +758,15 @@ const SfxSeg kSeg[] = {
     // 42 MISSION: E6 G6 C7
     {SQ, 0x40, 1319, 1319, 5, 0x22, 0}, {SQ, 0x40, 1568, 1568, 5, 0x22, 0},
     {SQ, 0x40, 2093, 2093, 18, 0x22, 0x90},
+    // 45 SHADES: slap of noise and a low falling thwack
+    {NZ, 0, 9000, 2000, 4, 0x2c, 0}, {SQ, 0x80, 330, 80, 14, 0x28, 0},
+    // 47 AIRHORN: BWAA-BWA-BWAAAA on Bb4, a fifth above as a layer
+    {SQ, 0x60, 480, 466, 14, 0x2a, 0xd0}, {SQ, 0x60, 466, 466, 4, 0x00, 0},
+    {SQ, 0x60, 480, 466, 8, 0x2a, 0xd0}, {SQ, 0x60, 466, 466, 4, 0x00, 0},
+    {SQ, 0x60, 480, 452, 45, 0x2a, 0xc0},
+    {SQ, 0x30, 720, 698, 14, 0x20, 0xd0}, {SQ, 0x30, 698, 698, 4, 0x00, 0},
+    {SQ, 0x30, 720, 698, 8, 0x20, 0xd0}, {SQ, 0x30, 698, 698, 4, 0x00, 0},
+    {SQ, 0x30, 720, 678, 45, 0x20, 0xc0},
 };
 
 struct SfxDef {
@@ -786,9 +795,11 @@ const SfxDef kSfx[] = {
     {30, 1, 31, 1, 2}, // GO
     {32, 5, 37, 5, 3}, // NEW_BEST
     {42, 3, 0, 0, 2},  // MISSION
+    {45, 2, 0, 0, 3},  // SHADES
+    {47, 5, 52, 5, 3}, // AIRHORN
 };
-static_assert(sizeof(kSfx) / sizeof(kSfx[0]) == size_t(Sfx::MISSION) + 1, "one entry per Sfx");
-static_assert(sizeof(kSeg) / sizeof(kSeg[0]) == 45, "segment indices above");
+static_assert(sizeof(kSfx) / sizeof(kSfx[0]) == size_t(Sfx::AIRHORN) + 1, "one entry per Sfx");
+static_assert(sizeof(kSeg) / sizeof(kSeg[0]) == 57, "segment indices above");
 
 // CHILI combo 1..10 climbs a major scale from C6
 const uint8_t kComboSteps[10] = {0, 2, 4, 5, 7, 9, 11, 12, 14, 16};

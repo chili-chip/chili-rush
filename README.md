@@ -22,15 +22,17 @@ On a PC: arrow keys or WASD, `Z` = A, `X` = B, `C` = X, `V` = Y, `Esc` or `2` = 
 
 ## How it plays
 
-- **Obstacles.** Low ones (fence, food cart, lava rock, tumbleweed): jump. Signs and arches: slide under. Tall ones (cactus, vending machine, spire): change lane. Every row of obstacles leaves a way through, and rows are always far enough apart to reach it.
+- **Obstacles.** Low ones (fence, food cart, lava rock, tumbleweed): jump. Signs and arches: slide under. Parked cars and the volcano's spires: change lane. A parked car's headlights may be off, dipped, on full beam or flashing. Every row of obstacles leaves a way through, and rows are always far enough apart to reach it.
 - **Chilis** score points and fill the heat bar. Picking them up in a row builds a combo: every 10 adds +1 to the multiplier (up to +4). Missing a chili resets the combo.
 - **Close calls.** Change lane at the last moment past an obstacle for bonus points and heat.
 - **Golden chili** fills the heat bar at once. **Milk** is a shield that takes one hit. The **sombrero** is a magnet for 10 seconds.
 - **Fire dash** (Y when the heat bar is full): 4 seconds of extra speed, you cannot be hit and you smash obstacles for points.
 - **Biomes.** The road goes from the desert at sunset to a neon city at night and into a volcano, then round again. It gets faster the further you run.
+- **Style.** STYLE on the title screen gives every obstacle four colour schemes: up/down picks the obstacle, left/right its colours.
+- **Start of a run.** PLAY starts with a short camera move: a close-up of the chili, the shades go on, and the camera swings round behind it. Any button skips it; restarts go straight to the countdown.
 - **Missions.** Three missions at a time (collect chilis, run a distance, jump, slide, close calls, combos, dashes). Every 3 completed missions give a star, and each star adds +1 to your base score multiplier.
 
-Best score, totals, missions and the music and sound settings are saved.
+Best score, totals, missions, the music and sound settings and the obstacle colours are saved.
 
 Testing on the console: press X on the title screen to show the frame rate and how long a frame takes to draw.
 
@@ -65,7 +67,7 @@ cmake --build build-test --target chili-rush-selftest
 - **Every update:** the object pool never fills, no chili inside an obstacle, no power-up inside a row, no NaN, score, combo, multiplier and heat stay sane, popups stay clear of the HUD, and the bot's model of the runner matches the game exactly.
 - **Flows:** the countdown, pause and resume, every way out of a run (crash, restart, quit, the console quitting the game) counting the run once with its chilis, best and missions, the results screen ignoring a held or mashed A, obstacles readable from far enough at top speed, the title demo never touching the save, damaged saves, catching up after a long stall, distances 200 km into a run, and text that must fit 128 px.
 
-It prints a summary and exits 1 on any failure (`-v` shows details, `--jobs N` sets the processes). `--frames DIR` renders fixed scenes (every biome, dash, magnet, shield, crash, results, pause) to images, `--clip DIR [--clip-from M]` renders 5 seconds of a run frame by frame (to compare changes to the look in motion), and `--bench` times the renderer.
+It prints a summary and exits 1 on any failure (`-v` shows details, `--jobs N` sets the processes). `--frames DIR` renders fixed scenes (every biome, dash, magnet, shield, crash, results, pause) to images, `--clip DIR [--clip-from M]` renders 5 seconds of a run frame by frame (to compare changes to the look in motion; `--clip-from -1` starts from the title with the intro), and `--bench` times the renderer.
 
 CI builds Linux, macOS, Windows, the web version, and the VGC `.uf2` and `.blit` on every push, and the Linux job runs the self-test. Publishing a GitHub release attaches all builds; a push to `main` deploys the web version to GitHub Pages.
 
@@ -77,9 +79,12 @@ CI builds Linux, macOS, Windows, the web version, and the VGC `.uf2` and `.blit`
 | `audio.cpp`, `audio.hpp` | Music sequencer and sound effects on the 32blit audio channels |
 | `sprites.hpp` | Where each sprite sits in `assets/sprites.png` |
 | `selftest.hpp`, `selftest_main.cpp` | The self-test (`-DCHILI_SELFTEST=ON`) and its headless stand-in for the console |
-| `tools/make_sprites.py` | Draws `assets/sprites.png`, `assets/splash.png` and `assets/icon.png` |
+| `tools/make_sprites.py` | Draws `assets/sprites.png`, `assets/splash.png` and `assets/icon.png`, and writes `paint.hpp` |
+| `paint.hpp` | Generated: the obstacle colours the STYLE menu changes, and the headlight colours |
 
-The road is drawn one screen row at a time: a row `y` below the horizon shows the road at depth `z = FOCAL / (y - HORIZON)`. Bends shift each row sideways by `curve * z²`, and sprites are scaled by their depth. `FOCAL` works like the camera's lens: a long lens (200) keeps obstacles far down the road big enough to tell apart, and the self-test checks that a fence 0.45 s away at top speed is at least 7 px wide. Objects fade in at the far end instead of popping up. It needs no 3D engine, which keeps it fast on the RP2350.
+The road is drawn one screen row at a time: a row `y` below the horizon shows the road at depth `z = FOCAL / (y - HORIZON)`. Bends shift each row sideways by `curve * z²`, and sprites are scaled by their depth. `FOCAL` works like the camera's lens: a long lens (200) keeps obstacles far down the road big enough to tell apart, and the self-test checks that a fence 0.45 s away at top speed is at least 7 px wide. Objects fade in at the far end instead of popping up.
+
+Obstacle colours cost nothing to draw: the sprite sheet is paletted, every colour of a paintable obstacle is a palette entry of its own (`tools/make_sprites.py` nudges shared colours by a step the 16-bit screen cannot show), and the STYLE menu rewrites those entries. Headlights are switched the same way for each car as it is drawn. It needs no 3D engine, which keeps it fast on the RP2350.
 
 ## Licence
 
