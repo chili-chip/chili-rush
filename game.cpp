@@ -9,6 +9,7 @@
 #include "assets.hpp"
 #include "audio.hpp"
 #include "sprites.hpp"
+#include "paint.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -271,9 +272,82 @@ void repair_save() {
     save.sound = save.sound ? 1 : 0;
 }
 
+// Obstacle colours from the STYLE menu, in their own save slot so older
+// saves keep working: one variant (0-3) per paint::items entry.
+constexpr uint32_t STYLE_MAGIC = 0x4c595453; // "STYL"
+struct StyleData {
+    uint32_t magic;
+    uint8_t v[paint::ITEMS];
+    uint8_t pad[2];
+};
+StyleData style;
+
+// Palette entries of the sprite sheet for each paintable colour, found by
+// colour once the sheet is loaded (paint.hpp makes each one unique).
+uint8_t paint_slot[paint::ITEMS][paint::MAX_COLOURS];
+uint8_t lamp_slot[2][2];  // [desert, city][bright, dim]
+bool paint_found = false;
+
+int find_colour(uint32_t rgb) {
+    Surface *sh = screen.sprites;
+    for(int i = 0; i < 256; i++) {
+        const Pen &p = sh->palette[i];
+        if(p.a == 255 && p.r == ((rgb >> 16) & 255) && p.g == ((rgb >> 8) & 255) && p.b == (rgb & 255)) return i;
+    }
+    return -1;
+}
+
+bool find_paint() {
+    if(paint_found) return true;
+    if(!screen.sprites || !screen.sprites->palette) return false;
+    for(int i = 0; i < paint::ITEMS; i++)
+        for(int k = 0; k < paint::items[i].count; k++) {
+            int slot = find_colour(paint::items[i].rgb[0][k]);
+            if(slot < 0) return false;
+            paint_slot[i][k] = uint8_t(slot);
+        }
+    for(int k = 0; k < 2; k++) {
+        int a = find_colour(paint::lamp_desert_on[k]), b = find_colour(paint::lamp_city_on[k]);
+        if(a < 0 || b < 0) return false;
+        lamp_slot[0][k] = uint8_t(a);
+        lamp_slot[1][k] = uint8_t(b);
+    }
+    paint_found = true;
+    return true;
+}
+
+Pen pen_rgb(uint32_t rgb) { return Pen(int((rgb >> 16) & 255), int((rgb >> 8) & 255), int(rgb & 255)); }
+
+void apply_style() {
+    if(!find_paint()) return;
+    for(int i = 0; i < paint::ITEMS; i++) {
+        int v = style.v[i] < paint::VARIANTS ? style.v[i] : 0;
+        for(int k = 0; k < paint::items[i].count; k++) screen.sprites->palette[paint_slot[i][k]] = pen_rgb(paint::items[i].rgb[v][k]);
+    }
+}
+
+// car 0 = desert pickup, 1 = city racer
+void set_headlights(int car, bool on) {
+    if(!paint_found) return;
+    const uint32_t *c = car == 0 ? (on ? paint::lamp_desert_on : paint::lamp_desert_off)
+                                 : (on ? paint::lamp_city_on : paint::lamp_city_off);
+    for(int k = 0; k < 2; k++) screen.sprites->palette[lamp_slot[car][k]] = pen_rgb(c[k]);
+}
+
+void reset_style() {
+    memset(&style, 0, sizeof(style));
+    style.magic = STYLE_MAGIC;
+}
+
+void store_style() { write_save(style, 1); }
+
 void load_game() {
     if(!read_save(save) || save.magic != SAVE_MAGIC || save.version != SAVE_VERSION) reset_save();
     repair_save();
+    if(!read_save(style, 1) || style.magic != STYLE_MAGIC) reset_style();
+    for(auto &v : style.v)
+        if(v >= paint::VARIANTS) v = 0;
+    apply_style();
 }
 
 void store_game() { write_save(save); }
@@ -327,6 +401,14 @@ void st_profile(int phase);  // render timing
 bool st_ghost = false;  // the test bot passes through obstacles
 #endif
 
+// Headlights of a parked car, fixed per car (from where it stands, so the
+// level generation draws no extra random numbers).
+enum LightMode : uint8_t { LIGHT_OFF, LIGHT_DIPPED, LIGHT_FULL, LIGHT_FLASH, LIGHT_MODES };
+int light_mode(float s) {
+    uint32_t h = hash32(uint32_t(int32_t(floorf(s * 64.0f))) ^ 0x9e3779b9u) % 100u;
+    return h < 30 ? LIGHT_OFF : h < 58 ? LIGHT_DIPPED : h < 84 ? LIGHT_FULL : LIGHT_FLASH;
+}
+
 Obj *spawn(Kind k, float x, float s, float h = 0.0f) {
     for(auto &o : objs) {
         if(o.kind == K_NONE) {
@@ -336,6 +418,7 @@ Obj *spawn(Kind k, float x, float s, float h = 0.0f) {
             o.s = s;
             o.h = h;
             o.biome = uint8_t(biome_at(s));
+            if(k == K_BLOCK) o.art = uint8_t(light_mode(s));
 #ifdef CHILI_SELFTEST
             st_spawned(o);
 #endif
@@ -413,7 +496,7 @@ void popup(const char *text, float x, float y, Pen pen) {
 // ---------------------------------------------------------------------------
 // Game state
 
-enum class State { TITLE, MISSIONS, SETTINGS, HELP, READY, RUN, PAUSE, RESUME, CRASH, OVER };
+enum class State { TITLE, MISSIONS, SETTINGS, HELP, READY, RUN, PAUSE, RESUME, CRASH, OVER, STYLE, INTRO };
 State state = State::TITLE;
 float state_time = 0.0f;
 int state_ticks = 0;  // updates in this state: exact timing for countdowns
@@ -861,6 +944,9 @@ Screen project(float x, float h, float z) {
 }
 
 float depth_of(const Obj &o) { return o.s - run.distance + Z_PLAYER; }
+
+// Where the runner's feet are on screen (without screen shake).
+float player_screen_x() { return 64.0f + (run.p.x - run.cam_x) * FOCAL / Z_PLAYER; }
 
 
 // ---------------------------------------------------------------------------
@@ -1452,7 +1538,7 @@ const Rect &obstacle_rect(Kind k, int biome, uint32_t time) {
     switch(k) {
         case K_LOW:   return biome == 1 ? spr::cart : biome == 2 ? spr::barrier : spr::fence;
         case K_HIGH:  return biome == 1 ? spr::banner_city : biome == 2 ? spr::banner_lava : spr::banner;
-        case K_BLOCK: return biome == 1 ? spr::vending : biome == 2 ? spr::spire : spr::cactus;
+        case K_BLOCK: return biome == 1 ? spr::car_city : biome == 2 ? spr::spire : spr::car_desert;
         case K_WEED:  return spr::weed[(time / 90u) & 1u];
         case K_CHILI: return spr::chili[(time / 200u) & 1u];
         case K_GOLDEN: return spr::golden;
@@ -1464,8 +1550,8 @@ const Rect &obstacle_rect(Kind k, int biome, uint32_t time) {
 }
 
 const Rect &decor_rect(int biome, int art) {
-    static const Rect *desert[4] = {&spr::agave, &spr::rock, &spr::skull, &spr::sign};
-    static const Rect *city[4] = {&spr::lamp, &spr::tower, &spr::lamp, &spr::sign};
+    static const Rect *desert[4] = {&spr::agave, &spr::cactus, &spr::skull, &spr::sign};
+    static const Rect *city[4] = {&spr::lamp, &spr::tower, &spr::vending, &spr::sign};
     static const Rect *volcano[4] = {&spr::pillar, &spr::vent, &spr::pillar, &spr::sign};
     const Rect *const *set = biome == 1 ? city : biome == 2 ? volcano : desert;
     return *set[art & 3];
@@ -1496,6 +1582,98 @@ struct DrawItem {
     float z;
     Obj *obj;
 };
+
+// ---------------------------------------------------------------------------
+// Headlights of the parked cars
+
+// 0 = off, 1 = dipped, 2 = full beam. Sets the car's lamp colours for its draw.
+int car_lights(const Obj &o, uint32_t time) {
+    if(o.kind != K_BLOCK || o.biome > 1) return 0;
+    int lit = 0;
+    switch(o.art) {
+        case LIGHT_DIPPED: lit = 1; break;
+        case LIGHT_FULL: lit = 2; break;
+        case LIGHT_FLASH: {
+            // two quick flashes, then dark, at a rhythm of its own
+            uint32_t ph = (time + (hash32(uint32_t(o.s * 64.0f)) & 1023u)) % 1300u;
+            lit = (ph < 110u || (ph >= 220u && ph < 330u)) ? 2 : 0;
+            break;
+        }
+        default: break;
+    }
+    set_headlights(o.biome, lit != 0);
+    return o.smashed ? 0 : lit;
+}
+
+constexpr float LAMP_X = 0.142f;  // lamps either side of the car's centre (world units)
+
+float lamp_height(int biome) { return biome == 0 ? 0.115f : 0.142f; }
+Pen beam_pen(int biome) { return biome == 0 ? Pen(255, 236, 170) : Pen(190, 230, 255); }
+
+// Light thrown on the road towards the runner, brighter near the car.
+void draw_beams(const Obj &o, float z, bool full) {
+    float len = full ? 7.0f : 2.6f;
+    float z_end = std::max(Z_NEAR, z - len);
+    int y0 = int(float(HORIZON) + view_dy + FOCAL / z) + 1;
+    int y1 = std::min(SH - 1, int(float(HORIZON) + view_dy + FOCAL / z_end));
+    Pen pen = beam_pen(o.biome);
+    float strength = (full ? 70.0f : 46.0f) * (float(screen.alpha) / 255.0f);
+    for(int y = y0; y <= y1; y++) {
+        float k = float(y) - float(HORIZON) - view_dy;
+        if(k <= 0.5f) continue;
+        float zr = FOCAL / k;
+        float t = clampf((z - zr) / len, 0.0f, 1.0f);
+        Screen c = project(o.x, 0.0f, zr);
+        float half = (LAMP_X + 0.06f + t * (full ? 0.34f : 0.2f)) * FOCAL / zr;
+        float fall = (1.0f - t) * (1.0f - t);
+        pen.a = uint8_t(strength * fall);
+        if(pen.a < 4) continue;
+        screen.pen = pen;
+        screen.h_span(Point(int(c.x - half), y), int(half * 2.0f) + 1);
+        pen.a = uint8_t(std::min(255.0f, strength * 0.8f * fall));
+        screen.pen = pen;
+        int core = int(half * 0.55f);
+        screen.h_span(Point(int(c.x) - core, y), core * 2 + 1);
+    }
+}
+
+// Halo round each lamp; full beams add a lens streak and glare as they near.
+void draw_glow(const Obj &o, float z, bool full) {
+    float hgt = lamp_height(o.biome);
+    Pen pen = beam_pen(o.biome);
+    float a = float(screen.alpha) / 255.0f;
+    for(int side = -1; side <= 1; side += 2) {
+        Screen l = project(o.x + float(side) * LAMP_X, hgt, z);
+        float r = (full ? 8.0f : 4.5f) * l.scale;
+        Point c(int(l.x), int(l.y));
+        if(r >= 1.0f) {
+            pen.a = uint8_t((full ? 46.0f : 34.0f) * a);
+            screen.pen = pen;
+            screen.circle(c, int(r));
+            pen.a = uint8_t((full ? 90.0f : 70.0f) * a);
+            screen.pen = pen;
+            screen.circle(c, std::max(1, int(r * 0.5f)));
+        }
+        screen.pen = Pen(255, 255, 255, uint8_t(220.0f * a));
+        screen.pixel(c);
+        if(full) {
+            int w = int(18.0f * l.scale) + 1;
+            pen.a = uint8_t(80.0f * a);
+            screen.pen = pen;
+            screen.h_span(Point(c.x - w, c.y), w * 2 + 1);
+        }
+    }
+    if(full) {
+        // dazzle: the whole screen brightens a little as full beams get close
+        float near = 1.0f - clampf((z - Z_PLAYER) / 6.0f, 0.0f, 1.0f);
+        uint8_t g = uint8_t(near * near * 50.0f * a);
+        if(g > 2) {
+            pen.a = g;
+            screen.pen = pen;
+            screen.rectangle(Rect(0, 0, SW, SH));
+        }
+    }
+}
 
 void render_objects(uint32_t time, bool before_player) {
     // far to near; objects behind the player's feet are drawn after it
@@ -1535,7 +1713,10 @@ void render_objects(uint32_t time, bool before_player) {
 
         float bob = 0.0f;
         if(is_pickup(o.kind)) bob = sinf(float(time) * 0.008f + o.s) * 1.5f * p.scale;
+        int lights = car_lights(o, time);
+        if(lights) draw_beams(o, z, lights == 2);
         draw_scaled(obstacle_rect(o.kind, o.biome, time), p.x, p.y - bob, p.scale);
+        if(lights) draw_glow(o, z, lights == 2);
 
         // power-ups glow so they read at a distance
         if((o.kind == K_MILK || o.kind == K_SOMBRERO || o.kind == K_GOLDEN) && p.scale > 0.25f && ((time / 120u) & 1u)) {
@@ -1762,13 +1943,14 @@ void render_logo(int y, uint32_t time) {
     }
 }
 
-const char *title_items[] = {"PLAY", "MISSIONS", "HOW TO PLAY", "SETTINGS"};
+const char *title_items[] = {"PLAY", "MISSIONS", "STYLE", "HOW TO PLAY", "SETTINGS"};
+constexpr int TITLE_ITEMS = 5;
 const char *pause_items[] = {"RESUME", "RESTART", "QUIT TO TITLE"};
 
 void render_title(uint32_t time) {
     dim(110);
     render_logo(2, time);
-    render_menu(title_items, 4, 58, menu_cursor, time);
+    render_menu(title_items, TITLE_ITEMS, 56, menu_cursor, time);
     char buf[32];
     snprintf(buf, sizeof(buf), "BEST %lu", (unsigned long)save.best);
     text_shadow(buf, minimal_font, Point(64, 39), Pen(255, 240, 160), TextAlign::top_center);
@@ -1839,6 +2021,129 @@ void render_settings(uint32_t time) {
     text_shadow(buf, minimal_font, Point(64, 97), Pen(170, 160, 190), TextAlign::top_center);
     snprintf(buf, sizeof(buf), "FURTHEST %luM", (unsigned long)save.best_distance);
     text_shadow(buf, minimal_font, Point(64, 106), Pen(170, 160, 190), TextAlign::top_center);
+}
+
+// ---------------------------------------------------------------------------
+// STYLE menu: four colours for every obstacle
+
+int style_item = 0;
+
+const Rect &style_rect(int item, uint32_t time) {
+    static const Kind kinds[3] = {K_LOW, K_HIGH, K_BLOCK};
+    if(item == 9) return obstacle_rect(K_WEED, 0, time);
+    return obstacle_rect(kinds[item / 3], item % 3, time);
+}
+
+void render_style(uint32_t time) {
+    dim(170);
+    text_shadow("STYLE", outline_font, Point(64, 3), Pen(255, 220, 90), TextAlign::top_center);
+    // preview on a little stage
+    Rect box(20, 18, 88, 62);
+    screen.pen = Pen(255, 255, 255, 24);
+    screen.rectangle(box);
+    screen.pen = Pen(0, 0, 0, 60);
+    screen.rectangle(Rect(box.x, box.y + box.h - 12, box.w, 12));
+    const Rect &r = style_rect(style_item, time);
+    float sc = std::min(2.0f, std::min(float(box.w - 8) / float(r.w), float(box.h - 6) / float(r.h)));
+    sc = floorf(sc * 2.0f) / 2.0f;
+    if(style_item == 6 || style_item == 7) set_headlights(style_item - 6, ((time / 600u) & 3u) != 0);
+    draw_scaled(r, float(box.x + box.w / 2), float(box.y + box.h - 4), sc);
+    // name, position and arrows
+    char buf[24];
+    text_shadow(paint::items[style_item].name, minimal_font, Point(64, 84), Pen(255, 255, 255), TextAlign::top_center);
+    snprintf(buf, sizeof(buf), "%d/%d", style_item + 1, paint::ITEMS);
+    text_shadow(buf, minimal_font, Point(box.x + box.w - 2, box.y + 2), Pen(170, 160, 190), TextAlign::top_right);
+    int bounce = int((time / 200u) & 1u);
+    text_shadow("^", minimal_font, Point(box.x + 4, box.y + 2 - bounce), Pen(255, 230, 90));
+    text_shadow("v", minimal_font, Point(box.x + 4, box.y + box.h - 10 + bounce), Pen(255, 230, 90));
+    // the four colours: a swatch of each, the chosen one framed
+    const auto &it = paint::items[style_item];
+    for(int v = 0; v < paint::VARIANTS; v++) {
+        Rect sw(22 + v * 22, 96, 18, 9);
+        bool on = style.v[style_item] == v;
+        if(on) {
+            screen.pen = Pen(255, 255, 255);
+            screen.rectangle(Rect(sw.x - 2, sw.y - 2 - bounce, sw.w + 4, sw.h + 4));
+        }
+        for(int k = 0; k < 3; k++) {
+            // three tones of the obstacle's colours, light to dark
+            int idx = std::min(it.count - 1, (it.count - 1) * (k + 1) / 4);
+            screen.pen = pen_rgb(it.rgb[v][idx]);
+            screen.rectangle(Rect(sw.x + k * 6, sw.y - (on ? bounce : 0), 6, sw.h));
+        }
+    }
+    text_shadow("UP/DOWN: ITEM  L/R: COLOUR", minimal_font, Point(64, SH - 18), Pen(200, 190, 210), TextAlign::top_center);
+    if((time / 500u) & 1u) text_shadow("B: BACK", minimal_font, Point(64, SH - 9), Pen(200, 190, 210), TextAlign::top_center);
+}
+
+// ---------------------------------------------------------------------------
+// Start-of-run camera move: a close-up of the hero facing us, the shades
+// drop onto its face, then the camera swings round behind it.
+
+constexpr int INTRO_TICKS = 300;
+constexpr int INTRO_DROP = 70;    // shades start falling
+constexpr int INTRO_HIT = 110;    // shades land
+constexpr int INTRO_ORBIT = 170;  // camera starts to swing round
+constexpr const char *INTRO_LINE = "DEAL WITH IT";
+constexpr float INTRO_SCALE = 3.5f;
+constexpr float INTRO_FEET_Y = 100.0f;
+
+float smooth(float t) {
+    t = clampf(t, 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+// 0 at the start of the swing, 1 when the camera is behind the hero
+float intro_orbit() { return smooth(float(state_ticks - INTRO_ORBIT) / float(INTRO_TICKS - INTRO_ORBIT - 20)); }
+
+// how far the camera has turned, for the scenery and the road
+void intro_camera(float &pan, float &dx) {
+    float a = intro_orbit();
+    pan = a * 420.0f;
+    dx = sinf(a * 3.14159265f) * 38.0f;
+}
+
+void render_intro(uint32_t time) {
+    int t = state_ticks;
+    float a = intro_orbit();
+    float zoom = t < INTRO_ORBIT ? INTRO_SCALE + 0.25f * smooth(float(t) / float(INTRO_ORBIT)) : INTRO_SCALE + 0.25f;
+    float sc = zoom + (1.0f - zoom) * a;
+    float px = 64.0f + view_dx * (1.0f - a);
+    float py = INTRO_FEET_Y + (float(PLAYER_FEET_Y) - INTRO_FEET_Y) * a;
+    if(t >= INTRO_HIT && t < INTRO_ORBIT) py += sinf(float(t - INTRO_HIT) * 0.25f) * 1.5f * (1.0f - float(t - INTRO_HIT) / 60.0f);
+    // the hero turns as the camera swings: front, three quarters, side, three quarters, back
+    float deg = a * 180.0f;
+    const Rect *fr = deg < 22.0f ? &spr::intro_front : deg < 66.0f ? &spr::intro_q1 : deg < 112.0f ? &spr::intro_side
+                   : deg < 158.0f ? &spr::intro_q3 : &spr::run[0];
+    const Rect *sh = fr == &spr::intro_front ? &spr::shades_front : fr == &spr::intro_q1 ? &spr::shades_q1
+                   : fr == &spr::intro_side ? &spr::shades_side : nullptr;
+    draw_shadow(px, py, 14.0f * sc);
+    // the turning frames are drawn at twice the detail: half the scale
+    float fs = fr == &spr::run[0] ? sc : sc * 0.5f;
+    draw_scaled(*fr, px, py, fs);
+    if(sh && t >= INTRO_DROP) {
+        // fall, then sit on the eyes (the shades' top row is the frame's row 17)
+        float f = clampf(float(t - INTRO_DROP) / float(INTRO_HIT - INTRO_DROP), 0.0f, 1.0f);
+        float drop = (1.0f - f * f) * 80.0f;
+        int h = int(float(sh->h) * fs + 0.5f), w = int(float(sh->w) * fs + 0.5f);
+        int fh = int(float(fr->h) * fs + 0.5f);
+        float top = float(int(py) - fh) + 17.0f * fs - drop;
+        screen.stretch_blit(screen.sprites, *sh, Rect(int(px - float(w) * 0.5f), int(top), w, h));
+    }
+    // letterbox bars that slide away at the end
+    int bar = int(12.0f * (1.0f - smooth(float(t - (INTRO_TICKS - 40)) / 40.0f)));
+    if(bar > 0) {
+        screen.pen = Pen(0, 0, 0);
+        screen.rectangle(Rect(0, 0, SW, bar));
+        screen.rectangle(Rect(0, SH - bar, SW, bar));
+    }
+    if(t >= INTRO_HIT && t < INTRO_ORBIT + 20) {
+        int k = t - INTRO_HIT;
+        int y = SH - 24 + (k < 6 ? (6 - k) * 2 : 0);
+        Pen pen = ((time / 80u) & 1u) ? Pen(255, 255, 255) : Pen(255, 230, 90);
+        text_shadow(INTRO_LINE, outline_font, Point(64, y), pen, TextAlign::top_center);
+    }
+    if((time / 500u) & 1u && t > 20) text_shadow("A: SKIP", minimal_font, Point(SW - 2, 2), Pen(200, 190, 210), TextAlign::top_right);
 }
 
 void render_resume() {
@@ -1952,6 +2257,14 @@ void render(uint32_t time) {
         view_dx = (float(h & 0xff) / 255.0f - 0.5f) * shake * 14.0f;
         view_dy = (float((h >> 8) & 0xff) / 255.0f - 0.5f) * shake * 8.0f;
     }
+    // the intro's camera swing turns the scenery and slides the road sideways
+    float bg_saved = run.bg_scroll;
+    if(state == State::INTRO) {
+        float pan, dx;
+        intro_camera(pan, dx);
+        run.bg_scroll += pan;
+        view_dx += dx;
+    }
 
 #ifdef CHILI_SELFTEST
 #define PROFILE(n) st_profile(n)
@@ -1964,8 +2277,9 @@ void render(uint32_t time) {
     PROFILE(1);
     render_road();
     PROFILE(2);
+    run.bg_scroll = bg_saved;
     render_objects(time, true);
-    render_player(time);
+    if(state != State::INTRO) render_player(time);
     render_objects(time, false);
     PROFILE(3);
     render_particles();
@@ -1993,6 +2307,8 @@ void render(uint32_t time) {
         case State::RESUME: render_hud(time); render_resume(); break;
         case State::CRASH: render_hud(time); render_popups(); break;
         case State::OVER: render_over(time); break;
+        case State::STYLE: render_style(time); break;
+        case State::INTRO: render_intro(time); break;
     }
 
     if(show_fps) {
@@ -2034,6 +2350,13 @@ void begin_run() {
     audio::sfx(audio::Sfx::COUNTDOWN);
 }
 
+// From the title: the camera move first, then the countdown. Restarts skip it.
+void begin_intro() {
+    start_run(false);
+    set_state(State::INTRO);
+    audio::play(audio::Track::NONE);
+}
+
 void resume_run() {
     set_state(State::RESUME);
     audio::sfx(audio::Sfx::COUNTDOWN);
@@ -2066,7 +2389,7 @@ void update(uint32_t time) {
         case State::TITLE:
             update_run(false);
             if(buttons.pressed & Button::X) show_fps = !show_fps;
-            if(menu_nav(4)) {
+            if(menu_nav(TITLE_ITEMS)) {
                 audio::sfx(audio::Sfx::MENU_OK);
                 switch(menu_cursor) {
                     case 0:
@@ -2075,15 +2398,62 @@ void update(uint32_t time) {
                             store_game();
                             set_state(State::HELP);
                         } else {
-                            begin_run();
+                            begin_intro();
                         }
                         break;
                     case 1: set_state(State::MISSIONS); break;
-                    case 2: set_state(State::HELP); break;
-                    case 3: set_state(State::SETTINGS); menu_cursor = 0; break;
+                    case 2: set_state(State::STYLE); break;
+                    case 3: set_state(State::HELP); break;
+                    case 4: set_state(State::SETTINGS); menu_cursor = 0; break;
                 }
             }
             break;
+
+        case State::STYLE: {
+            update_run(false);
+            int dv = 0;
+            if(buttons.pressed & Button::DPAD_UP) {
+                style_item = (style_item + paint::ITEMS - 1) % paint::ITEMS;
+                audio::sfx(audio::Sfx::MENU_MOVE);
+            }
+            if(buttons.pressed & Button::DPAD_DOWN) {
+                style_item = (style_item + 1) % paint::ITEMS;
+                audio::sfx(audio::Sfx::MENU_MOVE);
+            }
+            if(buttons.pressed & (Button::DPAD_RIGHT | Button::A)) dv = 1;
+            if(buttons.pressed & Button::DPAD_LEFT) dv = paint::VARIANTS - 1;
+            if(dv) {
+                style.v[style_item] = uint8_t((style.v[style_item] + dv) % paint::VARIANTS);
+                apply_style();
+                store_style();
+                audio::sfx(audio::Sfx::MENU_MOVE);
+            }
+            if(buttons.pressed & Button::B) {
+                audio::sfx(audio::Sfx::MENU_OK);
+                set_state(State::TITLE);
+                menu_cursor = 2;
+            }
+            break;
+        }
+
+        case State::INTRO: {
+            // the world holds still; any button skips to the countdown
+            if(state_ticks == INTRO_DROP) audio::sfx(audio::Sfx::LANE);
+            if(state_ticks == INTRO_HIT) {
+                audio::sfx(audio::Sfx::SHADES);
+                audio::sfx(audio::Sfx::AIRHORN);
+                run.shake = 0.2f;
+                run.flash = 0.2f;
+                run.flash_pen = Pen(255, 255, 255);
+            }
+            if(state_ticks == INTRO_ORBIT) audio::sfx(audio::Sfx::LANE);
+            bool skip = state_ticks > 5 && (buttons.pressed & (Button::A | Button::B | Button::X | Button::Y));
+            if(skip || state_ticks >= INTRO_TICKS) {
+                set_state(State::READY);
+                audio::sfx(audio::Sfx::COUNTDOWN);
+            }
+            break;
+        }
 
         case State::MISSIONS:
             update_run(false);
@@ -2099,7 +2469,7 @@ void update(uint32_t time) {
             if(state_time > 0.3f && (buttons.pressed & (Button::A | Button::B))) {
                 audio::sfx(audio::Sfx::MENU_OK);
                 // first time: the help screen leads into the run
-                if(menu_cursor == 0) begin_run();
+                if(menu_cursor == 0) begin_intro();
                 else set_state(State::TITLE);
             }
             break;
@@ -2122,7 +2492,7 @@ void update(uint32_t time) {
             } else if((ok && menu_cursor == 2) || (buttons.pressed & Button::B)) {
                 audio::sfx(audio::Sfx::MENU_OK);
                 set_state(State::TITLE);
-                menu_cursor = 3;
+                menu_cursor = 4;
             }
             break;
         }

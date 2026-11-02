@@ -32,6 +32,8 @@ enum class Sfx : uint8_t {
     GO,
     NEW_BEST,
     MISSION,    // a mission is completed
+    SHADES,     // intro: the shades land on the hero's face
+    AIRHORN,    // intro: three air horn blasts
 };
 
 void init();
