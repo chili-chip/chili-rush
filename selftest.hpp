@@ -1230,7 +1230,32 @@ void flow_intro() {
     }
     expect(state == State::READY && n == INTRO_TICKS, "flow: intro", "intro took %d updates, then state %d (want %d, READY)", n,
            int(state), INTRO_TICKS);
+    // the whole move runs a little slower than the first 3 s version (about
+    // 1.3x), every part alike, so the line keeps its share of the time
+    int shown = 0;
+    for(int t = 0; t < INTRO_TICKS; t++) shown += intro_line_shown(t);
+    expect(INTRO_TICKS >= 370 && INTRO_TICKS <= 410 && shown * 100 >= INTRO_TICKS * 25 && shown * 100 <= INTRO_TICKS * 30,
+           "flow: intro pace", "intro %d updates (want 370-410), '%s' shown %d of them (want 25-30%%)", INTRO_TICKS, INTRO_LINE,
+           shown);
     expect(run.distance == d0 && alpha_ok, "flow: intro", "the run moved during the intro or drawing left alpha/NaN");
+    // the hills and the sun move smoothly through the intro and into the
+    // countdown: no jump when the camera hands over to the run
+    to_title();
+    steps(5);
+    step(Button::A);
+    float prev = scenery_scroll(), worst = 0.0f;
+    int worst_at = 0;
+    for(int i = 0; i < INTRO_TICKS + 30; i++) {
+        step();
+        float now = scenery_scroll();
+        if(fabsf(now - prev) > worst) {
+            worst = fabsf(now - prev);
+            worst_at = i;
+        }
+        prev = now;
+    }
+    expect(worst <= 6.0f, "flow: intro smooth", "the scenery jumps %.1f px in one update (update %d of the intro, which has %d)",
+           double(worst), worst_at, INTRO_TICKS);
     // skip
     to_title();
     steps(5);

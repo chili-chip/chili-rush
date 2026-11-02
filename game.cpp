@@ -2103,10 +2103,12 @@ void render_style(uint32_t time) {
 // Start-of-run camera move: a close-up of the hero facing us, the shades
 // drop onto its face, then the camera swings round behind it.
 
-constexpr int INTRO_TICKS = 300;
-constexpr int INTRO_DROP = 70;    // shades start falling
-constexpr int INTRO_HIT = 110;    // shades land
-constexpr int INTRO_ORBIT = 170;  // camera starts to swing round
+// the whole move runs at 1.3x the length of its first version (3 s -> 3.9 s)
+constexpr int INTRO_TICKS = 390;
+constexpr int INTRO_DROP = 91;    // shades start falling
+constexpr int INTRO_HIT = 143;    // shades land
+constexpr int INTRO_ORBIT = 221;  // camera starts to swing round
+constexpr int INTRO_HOLD = 26;    // the camera rests behind the hero before the countdown
 constexpr const char *INTRO_LINE = "DEAL WITH IT";
 constexpr float INTRO_SCALE = 3.5f;
 constexpr float INTRO_FEET_Y = 100.0f;
@@ -2117,7 +2119,7 @@ float smooth(float t) {
 }
 
 // 0 at the start of the swing, 1 when the camera is behind the hero
-float intro_orbit() { return smooth(float(state_ticks - INTRO_ORBIT) / float(INTRO_TICKS - INTRO_ORBIT - 20)); }
+float intro_orbit() { return smooth(float(state_ticks - INTRO_ORBIT) / float(INTRO_TICKS - INTRO_ORBIT - INTRO_HOLD)); }
 
 // how far the camera has turned, for the scenery and the road
 void intro_camera(float &pan, float &dx) {
@@ -2126,6 +2128,21 @@ void intro_camera(float &pan, float &dx) {
     dx = sinf(a * 3.14159265f) * 38.0f;
 }
 
+// the scroll the hills and the sun are drawn at: the run's own, plus the
+// intro's camera swing while it plays
+float scenery_scroll() {
+    float s = run.bg_scroll;
+    if(state == State::INTRO) {
+        float pan, dx;
+        intro_camera(pan, dx);
+        s += pan;
+    }
+    return s;
+}
+
+// the "DEAL WITH IT" line is on screen
+bool intro_line_shown(int t) { return t >= INTRO_HIT && t < INTRO_ORBIT + INTRO_HOLD; }
+
 void render_intro(uint32_t time) {
     int t = state_ticks;
     float a = intro_orbit();
@@ -2133,7 +2150,7 @@ void render_intro(uint32_t time) {
     float sc = zoom + (1.0f - zoom) * a;
     float px = 64.0f + view_dx * (1.0f - a);
     float py = INTRO_FEET_Y + (float(PLAYER_FEET_Y) - INTRO_FEET_Y) * a;
-    if(t >= INTRO_HIT && t < INTRO_ORBIT) py += sinf(float(t - INTRO_HIT) * 0.25f) * 1.5f * (1.0f - float(t - INTRO_HIT) / 60.0f);
+    if(t >= INTRO_HIT && t < INTRO_ORBIT) py += sinf(float(t - INTRO_HIT) * 0.19f) * 1.5f * fmaxf(0.0f, 1.0f - float(t - INTRO_HIT) / 78.0f);
     // the hero turns as the camera swings: front, three quarters, side, three quarters, back
     float deg = a * 180.0f;
     const Rect *fr = deg < 22.0f ? &spr::intro_front : deg < 66.0f ? &spr::intro_q1 : deg < 112.0f ? &spr::intro_side
@@ -2154,16 +2171,16 @@ void render_intro(uint32_t time) {
         screen.stretch_blit(screen.sprites, *sh, Rect(int(px - float(w) * 0.5f), int(top), w, h));
     }
     // letterbox bars that slide away at the end
-    int bar = int(12.0f * (1.0f - smooth(float(t - (INTRO_TICKS - 40)) / 40.0f)));
+    int bar = int(12.0f * (1.0f - smooth(float(t - (INTRO_TICKS - 52)) / 52.0f)));
     if(bar > 0) {
         screen.pen = Pen(0, 0, 0);
         screen.rectangle(Rect(0, 0, SW, bar));
         screen.rectangle(Rect(0, SH - bar, SW, bar));
     }
-    if(t >= INTRO_HIT && t < INTRO_ORBIT + 20) {
+    if(intro_line_shown(t)) {
         int k = t - INTRO_HIT;
-        int y = SH - 24 + (k < 6 ? (6 - k) * 2 : 0);
-        Pen pen = ((time / 80u) & 1u) ? Pen(255, 255, 255) : Pen(255, 230, 90);
+        int y = SH - 24 + (k < 8 ? (8 - k) * 3 / 2 : 0);
+        Pen pen = ((time / 104u) & 1u) ? Pen(255, 255, 255) : Pen(255, 230, 90);
         text_shadow(INTRO_LINE, outline_font, Point(64, y), pen, TextAlign::top_center);
     }
     if((time / 500u) & 1u && t > 20) text_shadow("A: SKIP", minimal_font, Point(SW - 2, 2), Pen(200, 190, 210), TextAlign::top_right);
@@ -2285,9 +2302,9 @@ void render(uint32_t time) {
     if(state == State::INTRO) {
         float pan, dx;
         intro_camera(pan, dx);
-        run.bg_scroll += pan;
         view_dx += dx;
     }
+    run.bg_scroll = scenery_scroll();
 
 #ifdef CHILI_SELFTEST
 #define PROFILE(n) st_profile(n)
@@ -2472,6 +2489,8 @@ void update(uint32_t time) {
             if(state_ticks == INTRO_ORBIT) audio::sfx(audio::Sfx::LANE);
             bool skip = state_ticks > 5 && (buttons.pressed & (Button::A | Button::B | Button::X | Button::Y));
             if(skip || state_ticks >= INTRO_TICKS) {
+                // the camera stays where it turned to, so the hills don't jump back
+                run.bg_scroll = scenery_scroll();
                 set_state(State::READY);
                 audio::sfx(audio::Sfx::COUNTDOWN);
             }
