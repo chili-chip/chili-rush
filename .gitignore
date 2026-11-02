@@ -1,2 +1,6 @@
 build/
 build.*/
+tools/out/
+tools/render_audio
+*.wav
+build-*/
