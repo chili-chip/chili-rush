@@ -1114,6 +1114,30 @@ void flow_cars() {
     // rendering a lit car leaves the global alpha at 255
     ::render(clock_ms);
     expect(screen.alpha == 255, "flow: headlights", "alpha left at %d after drawing", int(screen.alpha));
+
+    // full beams glow round each lamp: no flat streak of light sideways
+    // across the screen (it read as a stray line on the results screen)
+    for(int biome = 0; biome < 2; biome++) {
+        Obj car{};
+        car.kind = K_BLOCK;
+        car.biome = uint8_t(biome);
+        car.x = 0.0f;
+        float z = Z_PLAYER + 7.0f;  // near, but before the dazzle starts
+        screen.alpha = 255;
+        screen.pen = Pen(0, 0, 0);
+        screen.clear();
+        draw_glow(car, z, true);
+        Screen l = project(-LAMP_X, lamp_height(biome), z);
+        Screen r = project(LAMP_X, lamp_height(biome), z);
+        int reach = int(8.0f * l.scale) + 1;  // the outer halo's radius
+        int y = int(l.y), lit_outside = 0;
+        for(int x = 0; x < SW; x++) {
+            bool near_lamp = abs(x - int(l.x)) <= reach || abs(x - int(r.x)) <= reach;
+            if(!near_lamp && framebuffer[y * SW + x] != 0) lit_outside++;
+        }
+        expect(lit_outside == 0, "flow: headlights", "biome %d: %d pixels lit on the lamp row outside the halos", biome,
+               lit_outside);
+    }
 }
 
 // Every paintable colour is one palette entry of the sprite sheet, and

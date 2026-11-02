@@ -1658,7 +1658,7 @@ void draw_beams(const Obj &o, float z, bool full) {
     }
 }
 
-// Halo round each lamp; full beams add a lens streak and glare as they near.
+// Halo round each lamp; full beams add glare as they near.
 void draw_glow(const Obj &o, float z, bool full) {
     float hgt = lamp_height(o.biome);
     Pen pen = beam_pen(o.biome);
@@ -1677,12 +1677,6 @@ void draw_glow(const Obj &o, float z, bool full) {
         }
         screen.pen = Pen(255, 255, 255, uint8_t(220.0f * a));
         screen.pixel(c);
-        if(full) {
-            int w = int(18.0f * l.scale) + 1;
-            pen.a = uint8_t(80.0f * a);
-            screen.pen = pen;
-            screen.h_span(Point(c.x - w, c.y), w * 2 + 1);
-        }
     }
     if(full) {
         // dazzle: the whole screen brightens a little as full beams get close
