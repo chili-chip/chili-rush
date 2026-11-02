@@ -1227,15 +1227,17 @@ void flow_intro() {
 // feet in every lane, not at the middle of the screen (the camera follows
 // the runner only part of the way, so side lanes sit off centre).
 void flow_dust_at_feet() {
-    fresh_save();
-    to_running();
     for(int lane_dir : {-1, 1}) {
+        fresh_save();
+        to_running();
+        st_ghost = true;  // nothing may end the run while we watch the feet
         step(lane_dir < 0 ? Button::DPAD_LEFT : Button::DPAD_RIGHT);
         steps(60);
         float feet = player_screen_x();
         int far = 0, seen = 0;
         for(int i = 0; i < 300; i++) {
             for(auto &p : particles) p.life = 0.0f;
+            st_ghost = true;
             step(i == 100 ? Button::A : 0);  // a jump gives a landing puff too
             for(auto &p : particles) {
                 if(p.life <= 0.0f) continue;
@@ -1246,9 +1248,42 @@ void flow_dust_at_feet() {
         }
         expect(seen > 10 && far == 0 && fabsf(feet - 64.0f) > 4.0f, "flow: dust at feet",
                "lane %+d: %d of %d particles away from the feet at x %.0f", lane_dir, far, seen, double(feet));
-        step(lane_dir < 0 ? Button::DPAD_RIGHT : Button::DPAD_LEFT);
-        steps(60);
     }
+    st_ghost = false;
+    fresh_save();
+}
+
+// Jumps and slides sometimes use their alternate animation (star jump,
+// knee slide), never always and never never.
+void flow_alt_moves() {
+    fresh_save();
+    to_running();
+    int jumps = 0, jump_alts = 0, slides = 0, slide_alts = 0;
+    for(int k = 0; k < 80; k++) {
+        st_ghost = true;
+        bool jump = k % 2 == 0;
+        step(jump ? Button::A : Button::B);
+        bool alt = false, normal = false;
+        for(int i = 0; i < 70; i++) {
+            st_ghost = true;
+            const Rect *r = player_frame(clock_ms);
+            if(jump) {
+                alt |= r == &spr::jump_up_alt || r == &spr::jump_alt;
+                normal |= r == &spr::jump_up || r == &spr::jump;
+            } else {
+                alt |= r == &spr::slide_alt[0] || r == &spr::slide_alt[1];
+                normal |= r == &spr::slide || r == &spr::slide2;
+            }
+            step();
+        }
+        if(alt == normal) continue;  // not a clean jump or slide (both or neither shown)
+        if(jump) { jumps++; jump_alts += alt; }
+        else { slides++; slide_alts += alt; }
+    }
+    expect(jumps > 30 && slides > 30 && jump_alts * 6 > jumps && jump_alts * 2 < jumps && slide_alts * 6 > slides &&
+               slide_alts * 2 < slides,
+           "flow: alternate moves", "star jumps %d of %d, knee slides %d of %d", jump_alts, jumps, slide_alts, slides);
+    st_ghost = false;
     fresh_save();
 }
 
@@ -1350,13 +1385,15 @@ void scene_run_at(float d, int updates) {
 void scene_cars(float d) {
     scene_run_at(d, 1);
     for(auto &o : objs) o = Obj{};
-    struct { int lane; float ahead; uint8_t mode; } cars[3] = {{0, 6.0f, LIGHT_FULL}, {2, 11.0f, LIGHT_DIPPED}, {1, 16.0f, LIGHT_OFF}};
+    struct { int lane; float ahead; uint8_t mode; } cars[3] = {{0, 10.0f, LIGHT_FULL}, {2, 15.0f, LIGHT_DIPPED}, {1, 20.0f, LIGHT_OFF}};
     for(auto &c : cars) {
         Obj *o = spawn(K_BLOCK, lane_x(c.lane), run.distance + c.ahead);
         if(o) o->art = c.mode;
     }
-    st_ghost = true;
-    steps(1);
+    for(int i = 0; i < 40; i++) {
+        st_ghost = true;
+        step();
+    }
 }
 
 const Scene scenes[] = {
@@ -1456,8 +1493,16 @@ void render_scenes(const char *dir, bool bench) {
 
 // --clip DIR: a run from `d` metres, one image per drawn frame (every 20 ms),
 // to compare how the road reads in motion. The runner cannot crash here.
+// A negative `d` starts from the title instead: the intro, then the run.
 void render_clip(const char *dir, float d, int frames) {
-    scene_run_at(d, 1);
+    if(d < 0.0f) {
+        fresh_save();
+        to_title();
+        steps(5);
+        step(Button::A);
+    } else {
+        scene_run_at(d, 1);
+    }
     for(int i = 0; i < frames; i++) {
         st_ghost = true;
         steps(2);
@@ -1489,6 +1534,7 @@ void flows() {
     flow_style_menu();
     flow_intro();
     flow_dust_at_feet();
+    flow_alt_moves();
     st_ghost = false;
     fresh_save();
 }
@@ -1587,7 +1633,7 @@ int chili_selftest(int argc, char **argv) {
     ::init();
     save.seen_help = 1;
     if(clip_dir) {
-        st::render_clip(clip_dir, clip_from, 250);
+        st::render_clip(clip_dir, clip_from, clip_from < 0.0f ? 400 : 250);
         return 0;
     }
     if(frames_dir || bench) {

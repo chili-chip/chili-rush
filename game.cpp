@@ -613,6 +613,7 @@ struct Run {
     int prev_lane;        // the lane before the last change
     float run_anim;
     float land_t;          // >0 just after landing: squash frame
+    bool jump_alt, slide_alt;  // this jump / slide uses the alternate animation
     // power
     float heat;           // 0..1, full: fire dash ready
     float dash_t;         // >0 during a dash
@@ -892,12 +893,20 @@ bool sliding() { return body_sliding(run.p); }
 bool dashing() { return run.dash_t > 0.0f; }
 float jump_height() { return body_height(run.p); }
 
+bool alt_move(uint32_t salt);
+
 void do_jump() {
-    if(body_jump(run.p) & EV_JUMP) world_sfx(audio::Sfx::JUMP);
+    if(body_jump(run.p) & EV_JUMP) {
+        world_sfx(audio::Sfx::JUMP);
+        run.jump_alt = alt_move(1);
+    }
 }
 
 void do_slide() {
-    if(body_slide(run.p) & EV_SLIDE) world_sfx(audio::Sfx::SLIDE);
+    if(body_slide(run.p) & EV_SLIDE) {
+        world_sfx(audio::Sfx::SLIDE);
+        run.slide_alt = alt_move(2);
+    }
 }
 
 void change_lane(int dir) {
@@ -970,7 +979,7 @@ void crash() {
     run.shake = 0.5f;
     run.flash = 0.2f;
     run.flash_pen = Pen(255, 255, 255);
-    burst(64, float(PLAYER_FEET_Y - 10), 24, Pen(255, 80, 60), 70.0f, 2);
+    burst(player_screen_x(), float(PLAYER_FEET_Y - 10), 24, Pen(255, 80, 60), 70.0f, 2);
     set_state(State::CRASH);
 
     // results and saving happen once, here
@@ -1168,6 +1177,12 @@ void update_objects() {
     }
 }
 
+// About one jump or slide in three uses its alternate animation. Picked from
+// a hash, not the level's random numbers, so it changes nothing else.
+bool alt_move(uint32_t salt) {
+    return hash32(hash32(uint32_t(run.distance * 1000.0f)) ^ (salt * 0x9e3779b9u)) % 100u < 33u;
+}
+
 void update_player() {
     uint8_t ev = body_step(run.p);
     if(run.land_t > 0.0f) run.land_t = std::max(0.0f, run.land_t - DT);
@@ -1175,10 +1190,16 @@ void update_player() {
     if(ev & EV_LAND) {
         run.land_t = 0.09f;
         world_sfx(audio::Sfx::LAND);
-        burst(64, float(PLAYER_FEET_Y), 4, Pen(200, 170, 140), 20.0f);
+        burst(player_screen_x(), float(PLAYER_FEET_Y), 4, Pen(200, 170, 140), 20.0f);
     }
-    if(ev & EV_JUMP) world_sfx(audio::Sfx::JUMP);
-    if(ev & EV_SLIDE) world_sfx(audio::Sfx::SLIDE);
+    if(ev & EV_JUMP) {
+        world_sfx(audio::Sfx::JUMP);
+        run.jump_alt = alt_move(1);
+    }
+    if(ev & EV_SLIDE) {
+        world_sfx(audio::Sfx::SLIDE);
+        run.slide_alt = alt_move(2);
+    }
 
     // 8 frames per stride; stride rate grows with speed but less than linearly
     run.run_anim = fmodf(run.run_anim + DT * (9.0f + run.speed * 0.9f), 8.0f);
@@ -1278,7 +1299,7 @@ void update_run(bool input) {
         }
         // flames behind the runner
         if(rnd_int(2) == 0)
-            emit(64.0f + float(rnd_int(12) - 6), float(PLAYER_FEET_Y - 6 - rnd_int(14)), float(rnd_int(20) - 10), 30.0f,
+            emit(player_screen_x() + float(rnd_int(12) - 6), float(PLAYER_FEET_Y - 6 - rnd_int(14)), float(rnd_int(20) - 10), 30.0f,
                  0.35f, rnd_int(2) ? Pen(255, 180, 40) : Pen(255, 80, 20), 2);
     }
     if(run.grace_t > 0.0f) run.grace_t = std::max(0.0f, run.grace_t - DT);
@@ -1286,7 +1307,7 @@ void update_run(bool input) {
 
     // running dust
     if(!in_air() && rnd_int(6) == 0)
-        emit(64.0f + float(rnd_int(8) - 4), float(PLAYER_FEET_Y), float(rnd_int(16) - 8), 10.0f, 0.3f,
+        emit(player_screen_x() + float(rnd_int(8) - 4), float(PLAYER_FEET_Y), float(rnd_int(16) - 8), 10.0f, 0.3f,
              Pen(220, 200, 170));
 
     // biome change banner
@@ -1727,6 +1748,23 @@ void render_objects(uint32_t time, bool before_player) {
     screen.alpha = 255;
 }
 
+// The runner's sprite for this moment of the run.
+const Rect *player_frame(uint32_t time) {
+    if(state == State::CRASH || state == State::OVER) return &spr::hurt;
+    if(dashing()) return &spr::dash[(time / 80u) & 1u];
+    if(in_air()) {
+        float t = run.p.jump_t / JUMP_TIME;
+        if(run.jump_alt) return t < 0.22f ? &spr::jump_up_alt : (t < 0.62f ? &spr::jump_alt : &spr::jump_down);
+        return t < 0.22f ? &spr::jump_up : (t < 0.62f ? &spr::jump : &spr::jump_down);
+    }
+    if(sliding()) {
+        if(run.slide_alt) return &spr::slide_alt[(time / 80u) & 1u];
+        return ((time / 80u) & 1u) ? &spr::slide2 : &spr::slide;
+    }
+    if(run.land_t > 0.0f) return &spr::land;
+    return &spr::run[int(run.run_anim) & 7];
+}
+
 void render_player(uint32_t time) {
     if(run.grace_t > 0.0f && ((time / 70u) & 1u) && state == State::RUN) return;
 
@@ -1737,16 +1775,7 @@ void render_player(uint32_t time) {
     // shadow shrinks while in the air
     draw_shadow(px, py, 14.0f - lift * 0.15f);
 
-    const Rect *r;
-    if(state == State::CRASH || state == State::OVER) r = &spr::hurt;
-    else if(dashing()) r = &spr::dash[(time / 80u) & 1u];
-    else if(in_air()) {
-        float t = run.p.jump_t / JUMP_TIME;
-        r = t < 0.22f ? &spr::jump_up : (t < 0.62f ? &spr::jump : &spr::jump_down);
-    }
-    else if(sliding()) r = ((time / 80u) & 1u) ? &spr::slide2 : &spr::slide;
-    else if(run.land_t > 0.0f) r = &spr::land;
-    else r = &spr::run[int(run.run_anim) & 7];
+    const Rect *r = player_frame(time);
 
     // lean into lane changes
     float lean = (lane_x(run.p.lane) - run.p.x) / LANE_W;

@@ -542,6 +542,30 @@ def jump_down_frame():
                      hands=[(0, 4, False), (14, 6, False)], tails="fall", phase=1.0)
 
 
+# Alternates that play now and then so jumps and slides do not look the same
+# every time: a star jump, and a knee slide with the arms spread.
+def jump_up_alt_frame():
+    # take-off with both arms punched straight up, legs together
+    return hero_back(T=4, H=17, W=8, legs=[(7, 0, False), (8, 0, False)],
+                     hands=[(3, 0, False), (11, 0, False)], tails="rise", phase=1.3,
+                     dust=[(2.0, 21.5, 1.4, "e"), (13.5, 21.5, 1.4, "w")])
+
+
+def jump_alt_frame():
+    # apex: spread-eagle star, arms and legs wide, both soles at us
+    return hero_back(T=5, H=14, W=10, legs=[(2, 0, True), (13, 0, True)],
+                     hands=[(0, 1, False), (14, 1, False)], tails="float", phase=0.7)
+
+
+def slide_alt_frame(alt=0):
+    """Knee slide: low on both knees, soles towards us, arms spread wide."""
+    hands = [(0, 15, False), (14, 14, False)] if alt == 0 else [(0, 14, False), (14, 15, False)]
+    dust = ([(1.0, 22.0, 1.6, "e"), (14.5, 21.5, 1.5, "w"), (8.0, 23.0, 1.0, "e")] if alt == 0 else
+            [(1.5, 21.5, 1.5, "w"), (14.0, 22.0, 1.7, "e"), (5.0, 23.0, 1.1, "e")])
+    return hero_back(T=10, H=11, W=11, legs=[(5, 0, True), (10, 0, True)], hands=hands,
+                     tails="rise", phase=0.3 + alt, curl=1.0, dust=dust)
+
+
 def land_frame():
     return hero_back(T=9, H=12, W=12, legs=[(3, 0, False), (12, 0, False)],
                      hands=[(0, 15, True), (14, 15, True)], tails="flop", curl=1.5,
@@ -1911,7 +1935,8 @@ def parse_rects(path):
     return size, rects
 
 
-BOTTOM_ANCHORED = {"run", "jump", "jump_up", "jump_down", "land", "slide2", "slide", "dash", "hurt", "fence", "banner",
+BOTTOM_ANCHORED = {"run", "jump", "jump_up", "jump_down", "land", "slide2", "slide", "dash", "hurt",
+                   "jump_up_alt", "jump_alt", "slide_alt", "fence", "banner",
                    "cactus", "weed", "cart", "barrier", "vending", "spire",
                    "banner_city", "banner_lava", "agave", "rock", "skull",
                    "sign", "lamp", "tower", "pillar", "vent", "car_desert", "car_city",
@@ -1931,6 +1956,9 @@ def build_sprites():
         "land": land_frame(),
         "slide": slide_frame(0),
         "slide2": slide_frame(1),
+        "jump_up_alt": jump_up_alt_frame(),
+        "jump_alt": jump_alt_frame(),
+        "slide_alt": [slide_alt_frame(0), slide_alt_frame(1)],
         "dash": dash_frames(),
         "hurt": hurt_frame(),
         "fence": fence(),
