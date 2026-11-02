@@ -1763,6 +1763,33 @@ void render_scenes(const char *dir, bool bench) {
 // --clip DIR: a run from `d` metres, one image per drawn frame (every 20 ms),
 // to compare how the road reads in motion. The runner cannot crash here.
 // A negative `d` starts from the title instead: the intro, then the run.
+// --clip-bot: the planning bot steers the clip (lanes, jumps, slides, chilis,
+// a fire dash when the heat bar is full) instead of a straight ghost run; it
+// still passes through anything it cannot plan round, so the clip never ends.
+bool clip_bot = false;
+
+void clip_update(Forecast &fc, int &next_act, long &t) {
+    int act = A_NONE;
+    uint32_t extra = 0;
+    if(clip_bot && state == State::RUN && t % DECIDE == 0) {
+        bool dash_now = run.heat >= 1.0f && !dashing();
+        if(dash_now) extra |= Button::Y;
+        if(next_act >= 0 && !dash_now) {
+            act = next_act;
+            next_act = -1;
+        } else {
+            make_forecast(fc, HORIZON, dash_now);
+            act = plan(run.p, fc, &next_act);
+            if(act < 0) {
+                act = A_NONE;
+                next_act = -1;
+            }
+        }
+    }
+    t++;
+    step(act_buttons(act) | extra);
+}
+
 void render_clip(const char *dir, float d, int frames) {
     if(d < 0.0f) {
         fresh_save();
@@ -1772,9 +1799,13 @@ void render_clip(const char *dir, float d, int frames) {
     } else {
         scene_run_at(d, 1);
     }
+    Forecast fc;
+    int next_act = -1;
+    long t = 0;
     for(int i = 0; i < frames; i++) {
         st_ghost = true;
-        steps(2);
+        clip_update(fc, next_act, t);
+        clip_update(fc, next_act, t);
         ::render(clock_ms);
         char path[512];
         snprintf(path, sizeof(path), "%s/clip%04d.ppm", dir, i);
@@ -2065,6 +2096,7 @@ int chili_selftest(int argc, char **argv) {
     int seeds = 24, jobs = 1;
     const char *frames_dir = nullptr, *clip_dir = nullptr;
     float clip_from = 600.0f;
+    int clip_frames = 0;
     bool bench = false, flows_only = false;
 #ifdef __unix__
     jobs = std::max(1, std::min(16, int(sysconf(_SC_NPROCESSORS_ONLN))));
@@ -2078,9 +2110,11 @@ int chili_selftest(int argc, char **argv) {
         else if(!strcmp(argv[i], "--bench")) bench = true;
         else if(!strcmp(argv[i], "--clip") && i + 1 < argc) clip_dir = argv[++i];
         else if(!strcmp(argv[i], "--clip-from") && i + 1 < argc) clip_from = float(atof(argv[++i]));
+        else if(!strcmp(argv[i], "--clip-bot")) st::clip_bot = true;
+        else if(!strcmp(argv[i], "--clip-frames") && i + 1 < argc) clip_frames = atoi(argv[++i]);
         else if(!strcmp(argv[i], "--flows")) flows_only = true;
         else {
-            printf("usage: chili-rush-selftest [--seeds N] [--quick] [--jobs N] [-v] [--flows] [--frames DIR] [--bench] [--clip DIR [--clip-from M]]\n");
+            printf("usage: chili-rush-selftest [--seeds N] [--quick] [--jobs N] [-v] [--flows] [--frames DIR] [--bench] [--clip DIR [--clip-from M] [--clip-bot] [--clip-frames N]]\n");
             return 2;
         }
     }
@@ -2089,7 +2123,7 @@ int chili_selftest(int argc, char **argv) {
     ::init();
     save.seen_help = 1;
     if(clip_dir) {
-        st::render_clip(clip_dir, clip_from, clip_from < 0.0f ? 400 : 250);
+        st::render_clip(clip_dir, clip_from, clip_frames > 0 ? clip_frames : clip_from < 0.0f ? 400 : 250);
         return 0;
     }
     if(frames_dir || bench) {

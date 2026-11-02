@@ -22,17 +22,19 @@ On a PC: arrow keys or WASD, `Z` = A, `X` = B, `C` = X, `V` = Y, `Esc` or `2` = 
 
 ## How it plays
 
-- **Obstacles.** Low ones (fence, food cart, lava rock, tumbleweed): jump. Signs and arches: slide under. Parked cars and the volcano's spires: change lane. A parked car's headlights may be off, dipped, on full beam or flashing. Every row of obstacles leaves a way through, and rows are always far enough apart to reach it.
+- **Obstacles.** Low ones (fence, food cart, lava rock, tumbleweed): jump. The tumbleweed rolls across the road and now and then stops right on a line of chilis, so you have to jump it or leave the line. Signs and arches: slide under. Parked cars and the volcano's spires: change lane. A parked car's headlights may be off, dipped, on full beam or flashing. Every row of obstacles leaves a way through, and rows are always far enough apart to reach it.
 - **Chilis** score points and fill the heat bar. Picking them up in a row builds a combo: every 10 adds +1 to the multiplier (up to +4). Missing a chili resets the combo.
 - **Close calls.** Change lane at the last moment past an obstacle for bonus points and heat.
 - **Golden chili** fills the heat bar at once. **Milk** is a shield that takes one hit. The **sombrero** is a magnet for 10 seconds.
 - **Fire dash** (Y when the heat bar is full): 4 seconds of extra speed, you cannot be hit and you smash obstacles for points.
 - **Biomes.** The road goes from the desert at sunset to a neon city at night and into a volcano, then round again. It gets faster the further you run.
-- **Style.** STYLE on the title screen gives every obstacle four colour schemes: up/down picks the obstacle, left/right its colours.
+- **Shop (STYLE).** Every chili you collect goes into your wallet. STYLE on the title screen spends them: up/down picks an obstacle, left/right shows its four colour schemes, Y (or X) shows its second look, and A buys what is shown. The first colour is free; the others cost 200, 400 and 800 chilis, and a new look costs 2500 (hay bales, roadworks, bone pile, ranch gate, sky bridge, rib arch, camper van, taxi, crystals, old tyre). Anything not bought goes back when you leave. Saves from before the shop start with every chili you ever collected in the wallet and keep the colours already picked.
+- **Big moments.** A new best, a new biome and 100, 200, 500, 1000, 2000 and 5000 chilis in one run set the bottom of the screen on fire, with hit markers, bouncing text and an air horn; a close call gets a smaller burst.
+- **Moves.** Now and then the jump is a dab (a one-leg hop, a dab at the top, arms windmilling down) and the slide a knee slide.
 - **Start of a run.** PLAY starts with a short camera move: a close-up of the chili, the shades go on, and the camera swings round behind it. Any button skips it; restarts go straight to the countdown.
 - **Missions.** Three missions at a time (collect chilis, run a distance, jump, slide, close calls, combos, dashes). Every 3 completed missions give a star, and each star adds +1 to your base score multiplier.
 
-Best score, totals, missions, the music and sound settings and the obstacle colours are saved.
+Best score, totals, missions, the music and sound settings, the chili wallet, what you bought and the obstacle colours and looks are saved.
 
 Testing on the console: press X on the title screen to show the frame rate and how long a frame takes to draw.
 
@@ -65,9 +67,9 @@ cmake --build build-test --target chili-rush-selftest
 
 - **Fairness.** A bot that plans its moves (lane changes, jumps, slides, the jump buffer, fire dash) plays many seeds, from the first metre to top speed. Alongside, the test tracks every state a player could be in by now with any inputs (one every 0.05 s) and reports any obstacles that no inputs at all could survive, rechecked with an input every 10 ms. It must catch a hand-made wall of three blocks and pass the tightest fair rows.
 - **Every update:** the object pool never fills, no chili inside an obstacle, no power-up inside a row, no NaN, score, combo, multiplier and heat stay sane, popups stay clear of the HUD, and the bot's model of the runner matches the game exactly.
-- **Flows:** the countdown, pause and resume, every way out of a run (crash, restart, quit, the console quitting the game) counting the run once with its chilis, best and missions, the results screen ignoring a held or mashed A, obstacles readable from far enough at top speed, the title demo never touching the save, damaged saves, catching up after a long stall, distances 200 km into a run, and text that must fit 128 px.
+- **Flows:** the countdown, pause and resume, every way out of a run (crash, restart, quit, the console quitting the game) counting the run once with its chilis, best and missions, the results screen ignoring a held or mashed A, obstacles readable from far enough at top speed, the title demo never touching the save, damaged saves, the shop (buying, too few chilis, the wallet filling once per run, old saves, every look drawn), catching up after a long stall, distances 200 km into a run, and text that must fit 128 px.
 
-It prints a summary and exits 1 on any failure (`-v` shows details, `--jobs N` sets the processes). `--frames DIR` renders fixed scenes (every biome, dash, magnet, shield, crash, results, pause) to images, `--clip DIR [--clip-from M]` renders 5 seconds of a run frame by frame (to compare changes to the look in motion; `--clip-from -1` starts from the title with the intro), and `--bench` times the renderer.
+It prints a summary and exits 1 on any failure (`-v` shows details, `--jobs N` sets the processes). `--frames DIR` renders fixed scenes (every biome, dash, magnet, shield, the shop, every bought look, the big-moment effects, crash, results, pause) to images, `--clip DIR [--clip-from M]` renders 5 seconds of a run frame by frame (to compare changes to the look in motion; `--clip-from -1` starts from the title with the intro; `--clip-bot` lets the planning bot steer, as for the website GIF; `--clip-frames N` sets the length), and `--bench` times the renderer.
 
 CI builds Linux, macOS, Windows, the web version, and the VGC `.uf2` and `.blit` on every push, and the Linux job runs the self-test. Publishing a GitHub release attaches all builds; a push to `main` deploys the web version to GitHub Pages.
 
@@ -82,9 +84,11 @@ CI builds Linux, macOS, Windows, the web version, and the VGC `.uf2` and `.blit`
 | `tools/make_sprites.py` | Draws `assets/sprites.png`, `assets/splash.png` and `assets/icon.png`, and writes `paint.hpp` |
 | `paint.hpp` | Generated: the obstacle colours the STYLE menu changes, and the headlight colours |
 
+Saves: slot 0 holds the score, totals and missions, slot 1 the chosen colours and slot 2 the shop (wallet, bought colours and looks). Each has its own magic number, so a save from an older version keeps working.
+
 The road is drawn one screen row at a time: a row `y` below the horizon shows the road at depth `z = FOCAL / (y - HORIZON)`. Bends shift each row sideways by `curve * z²`, and sprites are scaled by their depth. `FOCAL` works like the camera's lens: a long lens (200) keeps obstacles far down the road big enough to tell apart, and the self-test checks that a fence 0.45 s away at top speed is at least 7 px wide. Objects fade in at the far end instead of popping up.
 
-Obstacle colours cost nothing to draw: the sprite sheet is paletted, every colour of a paintable obstacle is a palette entry of its own (`tools/make_sprites.py` nudges shared colours by a step the 16-bit screen cannot show), and the STYLE menu rewrites those entries. Headlights are switched the same way for each car as it is drawn. It needs no 3D engine, which keeps it fast on the RP2350.
+Obstacle colours cost nothing to draw: the sprite sheet is paletted, every colour of a paintable obstacle is a palette entry of its own (`tools/make_sprites.py` nudges shared colours by a step the 16-bit screen cannot show), and the STYLE menu rewrites those entries. An obstacle's second look uses the same entries, so one colour choice paints both looks. Headlights are switched the same way for each car as it is drawn. It needs no 3D engine, which keeps it fast on the RP2350.
 
 ## Licence
 
