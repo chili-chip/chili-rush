@@ -776,6 +776,7 @@ void fresh_save() {
     files.clear();
     reset_save();
     reset_style();
+    reset_shop();
     apply_style();
     save.seen_help = 1;
     store_game();
@@ -1114,6 +1115,225 @@ void flow_cars() {
     // rendering a lit car leaves the global alpha at 255
     ::render(clock_ms);
     expect(screen.alpha == 255, "flow: headlights", "alpha left at %d after drawing", int(screen.alpha));
+
+    // full beams glow round each lamp: no flat streak of light sideways
+    // across the screen (it read as a stray line on the results screen)
+    for(int biome = 0; biome < 2; biome++) {
+        Obj car{};
+        car.kind = K_BLOCK;
+        car.biome = uint8_t(biome);
+        car.x = 0.0f;
+        float z = Z_PLAYER + 7.0f;  // near, but before the dazzle starts
+        screen.alpha = 255;
+        screen.pen = Pen(0, 0, 0);
+        screen.clear();
+        draw_glow(car, z, true);
+        Screen l = project(-LAMP_X, lamp_height(biome), z);
+        Screen r = project(LAMP_X, lamp_height(biome), z);
+        int reach = int(8.0f * l.scale) + 1;  // the outer halo's radius
+        int y = int(l.y), lit_outside = 0;
+        for(int x = 0; x < SW; x++) {
+            bool near_lamp = abs(x - int(l.x)) <= reach || abs(x - int(r.x)) <= reach;
+            if(!near_lamp && framebuffer[y * SW + x] != 0) lit_outside++;
+        }
+        expect(lit_outside == 0, "flow: headlights", "biome %d: %d pixels lit on the lamp row outside the halos", biome,
+               lit_outside);
+    }
+}
+
+// How different two poses are: the share of the pixels covered by either
+// silhouette that only one of them covers (0 = same outline, 1 = no overlap).
+// Colours are left out on purpose: a retouched pose shifted by a pixel
+// changes most colours but hardly the outline.
+float frame_difference(const Rect &a, const Rect &b) {
+    Surface *sh = screen.sprites;
+    int either = 0, one = 0;
+    for(int y = 0; y < a.h; y++) {
+        for(int x = 0; x < a.w; x++) {
+            bool oa = sh->palette[sh->data[(a.y + y) * sh->bounds.w + a.x + x]].a > 0;
+            bool ob = sh->palette[sh->data[(b.y + y) * sh->bounds.w + b.x + x]].a > 0;
+            either += oa || ob;
+            one += oa != ob;
+        }
+    }
+    return either ? float(one) / float(either) : 0.0f;
+}
+
+// The alternate jump is a different move, not a retouch of the normal one:
+// every phase of it (take-off, top, fall) has an outline that differs from
+// the normal one by at least 45% (the first star jump: 25% and 34%).
+void flow_alt_jump_looks_different() {
+    float up = frame_difference(spr::jump_up_alt, spr::jump_up);
+    float top = frame_difference(spr::jump_alt, spr::jump);
+    float down = frame_difference(spr::jump_down_alt, spr::jump_down);
+    expect(up >= 0.45f && top >= 0.45f && down >= 0.45f, "flow: alternate jump",
+           "differs from the normal jump by %.0f%% at take-off, %.0f%% at the top, %.0f%% falling (want 45%% each)",
+           double(up * 100.0f), double(top * 100.0f), double(down * 100.0f));
+}
+
+// Big moments get a big effect ("hype"): flames from the bottom of the
+// screen, hit markers, a bouncing line of text and an air horn. A new best,
+// a new biome, 100/200/500/1000/2000/5000 chilis in one run, and (smaller) a
+// close call each start one; it ends by itself and leaves the drawing state
+// clean.
+void flow_hype() {
+    auto render_ok = [](const char *what) {
+        bool ok = true;
+        for(int i = 0; i < 40; i++) {
+            step();
+            ::render(clock_ms);
+            ok &= screen.alpha == 255 && finite_all();
+        }
+        expect(ok, "flow: hype", "%s: drawing left alpha or NaN", what);
+    };
+
+    // chilis in one run
+    fresh_save();
+    if(!to_running()) return;
+    Obj ch{};
+    ch.kind = K_CHILI;
+    const uint32_t marks[] = {100, 200, 500, 1000, 2000, 5000};
+    for(uint32_t m : marks) {
+        hype = Hype{};
+        run.chilis = m - 1;
+        collect(ch);
+        char want[16];
+        snprintf(want, sizeof(want), "%u CHILIS", m);
+        expect(hype_active(HYPE_CHILIS) && strcmp(hype.text, want) == 0, "flow: hype chilis",
+               "chili number %u: hype %d '%s', want '%s'", m, int(hype.kind), hype.text, want);
+    }
+    for(uint32_t n : {101u, 300u, 999u}) {
+        hype = Hype{};
+        run.chilis = n - 1;
+        collect(ch);
+        expect(!hype_active(HYPE_CHILIS), "flow: hype chilis", "chili number %u started a hype", n);
+    }
+    run.chilis = 499;
+    collect(ch);
+    render_ok("500 chilis");
+
+    // a new best, once per run
+    fresh_save();
+    save.best = 40;
+    if(!to_running()) return;
+    hype = Hype{};
+    run.score = 41;
+    step();
+    expect(hype_active(HYPE_BEST), "flow: hype best", "beating the best started hype %d", int(hype.kind));
+    render_ok("new best");
+    hype = Hype{};
+    run.score += 100;
+    steps(5);
+    expect(!hype_active(HYPE_BEST), "flow: hype best", "a second hype for the same best");
+
+    // a new biome
+    fresh_save();
+    if(!to_running()) return;
+    warp(890.0f);
+    hype = Hype{};
+    int b0 = biome_at(run.distance), n = 0;
+    while(biome_at(run.distance) == b0 && n++ < 3000) {
+        st_ghost = true;
+        step();
+    }
+    st_ghost = false;
+    expect(hype_active(HYPE_BIOME), "flow: hype biome", "entering a new biome started hype %d", int(hype.kind));
+    render_ok("new biome");
+
+    // a close call (the dodge from flow_close_calls)
+    fresh_save();
+    if(!to_running()) return;
+    for(auto &o : objs) if(o.kind != K_DECOR) o.kind = K_NONE;
+    run.next_spawn = run.distance + 60.0f;
+    run.p = Body{0, lane_x(0), 0, 0, 0, false};
+    float s = run.distance + run.speed * 0.2f;
+    spawn(K_BLOCK, lane_x(0), s);
+    spawn(K_BLOCK, lane_x(2), s);
+    hype = Hype{};
+    step(Button::DPAD_RIGHT);
+    bool seen = false;
+    for(int i = 0; i < 60 && !seen; i++) {
+        step();
+        seen = hype_active(HYPE_CLOSE);
+    }
+    expect(seen && run.close_calls == 1, "flow: hype close call", "close call %u, hype %d", run.close_calls, int(hype.kind));
+    render_ok("close call");
+
+    // every hype ends by itself within 2.5 s
+    steps(250);
+    expect(hype.kind == HYPE_NONE || hype.t <= 0.0f, "flow: hype", "hype %d still on after 2.5 s", int(hype.kind));
+    fresh_save();
+}
+
+// The tumbleweed hits only where it is drawn: a 16 px ball against the
+// runner's body, not half a lane either side of its centre.
+void flow_weed_hitbox() {
+    Body b{};
+    b.lane = 1;
+    b.x = 0.0f;
+    Obj w{};
+    w.kind = K_WEED;
+    w.s = 10.0f;
+    float px = 1.0f / float(PLAYER_FEET_Y - ::HORIZON);  // world width of a screen pixel at the runner
+    w.x = 6.0f * px;                                    // overlapping the body
+    bool hit_near = hits(b, w, 10.0f);
+    w.x = 16.0f * px;                                   // edge to edge: the ball rolls past
+    bool hit_beside = hits(b, w, 10.0f);
+    w.x = -16.0f * px;
+    hit_beside |= hits(b, w, 10.0f);
+    expect(hit_near && !hit_beside, "flow: tumbleweed hitbox", "hit when overlapping %d, hit when 16 px beside %d (want 1, 0)",
+           hit_near, hit_beside);
+    // the other obstacles keep their lane-wide hitbox
+    Obj f{};
+    f.kind = K_LOW;
+    f.s = 10.0f;
+    f.x = 16.0f * px;
+    expect(hits(b, f, 10.0f), "flow: tumbleweed hitbox", "a fence 16 px off centre no longer hits");
+}
+
+// Now and then a tumbleweed rolls into the lane of a chili line and stays
+// there, so a runner picking up chilis has to jump it or move.
+void flow_weed_settle() {
+    fresh_save();
+    to_running();
+    warp(1500.0f);
+    int weeds = 0, settlers = 0, bad_lane = 0, no_chilis = 0, late = 0;
+    std::vector<const Obj *> seen;
+    for(int i = 0; i < 80000; i++) {
+        st_ghost = true;
+        step();
+        for(auto &o : objs) {
+            if(o.kind != K_WEED || o.done) continue;
+            float z = depth_of(o);
+            if(z > Z_FAR) continue;
+            bool counted = false;
+            for(auto *p : seen) counted |= p == &o && fabsf(p->s - o.s) < 0.01f;
+            if(!counted && z < Z_FAR - 1.0f) {
+                seen.push_back(&o);
+                if(seen.size() > 40) seen.erase(seen.begin());
+                weeds++;
+                if(weed_settles(o)) {
+                    settlers++;
+                    // a chili line in the lane it will stop in, just before it
+                    int chilis = 0;
+                    for(auto &c : objs)
+                        if(c.kind == K_CHILI && fabsf(c.x - o.target_x) < 0.01f && c.s < o.s && c.s > o.s - 8.0f) chilis++;
+                    if(chilis < 2) no_chilis++;
+                }
+            }
+            if(weed_settles(o) && z < Z_PLAYER + 9.0f) {
+                int lane = int(roundf(o.x / LANE_W)) + 1;
+                if(lane < 0 || lane > 2 || fabsf(o.x - lane_x(lane)) > 0.001f) bad_lane++;
+                if(fabsf(o.x - o.target_x) > 0.001f) late++;
+            }
+        }
+    }
+    st_ghost = false;
+    expect(weeds >= 20 && settlers * 100 >= weeds * 15 && settlers * 100 <= weeds * 50, "flow: tumbleweed settles",
+           "%d of %d tumbleweeds stop in a lane (want 15-50%%)", settlers, weeds);
+    expect(bad_lane == 0 && late == 0 && no_chilis == 0, "flow: tumbleweed settles",
+           "near the runner: %d off a lane, %d not yet stopped; %d stop with no chili line before them", bad_lane, late, no_chilis);
+    fresh_save();
 }
 
 // Every paintable colour is one palette entry of the sprite sheet, and
@@ -1156,6 +1376,8 @@ void flow_style_paint() {
 // colour; the choice is saved and survives a restart; bad values reset.
 void flow_style_menu() {
     fresh_save();
+    for(auto &c : shop.colours) c = 0x0f;  // all colours bought (the shop has its own test)
+    store_shop();
     to_title();
     steps(5);
     step(Button::DPAD_DOWN);
@@ -1206,7 +1428,32 @@ void flow_intro() {
     }
     expect(state == State::READY && n == INTRO_TICKS, "flow: intro", "intro took %d updates, then state %d (want %d, READY)", n,
            int(state), INTRO_TICKS);
+    // the whole move runs a little slower than the first 3 s version (about
+    // 1.3x), every part alike, so the line keeps its share of the time
+    int shown = 0;
+    for(int t = 0; t < INTRO_TICKS; t++) shown += intro_line_shown(t);
+    expect(INTRO_TICKS >= 370 && INTRO_TICKS <= 410 && shown * 100 >= INTRO_TICKS * 25 && shown * 100 <= INTRO_TICKS * 30,
+           "flow: intro pace", "intro %d updates (want 370-410), '%s' shown %d of them (want 25-30%%)", INTRO_TICKS, INTRO_LINE,
+           shown);
     expect(run.distance == d0 && alpha_ok, "flow: intro", "the run moved during the intro or drawing left alpha/NaN");
+    // the hills and the sun move smoothly through the intro and into the
+    // countdown: no jump when the camera hands over to the run
+    to_title();
+    steps(5);
+    step(Button::A);
+    float prev = scenery_scroll(), worst = 0.0f;
+    int worst_at = 0;
+    for(int i = 0; i < INTRO_TICKS + 30; i++) {
+        step();
+        float now = scenery_scroll();
+        if(fabsf(now - prev) > worst) {
+            worst = fabsf(now - prev);
+            worst_at = i;
+        }
+        prev = now;
+    }
+    expect(worst <= 6.0f, "flow: intro smooth", "the scenery jumps %.1f px in one update (update %d of the intro, which has %d)",
+           double(worst), worst_at, INTRO_TICKS);
     // skip
     to_title();
     steps(5);
@@ -1253,7 +1500,7 @@ void flow_dust_at_feet() {
     fresh_save();
 }
 
-// Jumps and slides sometimes use their alternate animation (star jump,
+// Jumps and slides sometimes use their alternate animation (dab jump,
 // knee slide), never always and never never.
 void flow_alt_moves() {
     fresh_save();
@@ -1268,7 +1515,7 @@ void flow_alt_moves() {
             st_ghost = true;
             const Rect *r = player_frame(clock_ms);
             if(jump) {
-                alt |= r == &spr::jump_up_alt || r == &spr::jump_alt;
+                alt |= r == &spr::jump_up_alt || r == &spr::jump_alt || r == &spr::jump_down_alt;
                 normal |= r == &spr::jump_up || r == &spr::jump;
             } else {
                 alt |= r == &spr::slide_alt[0] || r == &spr::slide_alt[1];
@@ -1282,7 +1529,7 @@ void flow_alt_moves() {
     }
     expect(jumps > 30 && slides > 30 && jump_alts * 6 > jumps && jump_alts * 2 < jumps && slide_alts * 6 > slides &&
                slide_alts * 2 < slides,
-           "flow: alternate moves", "star jumps %d of %d, knee slides %d of %d", jump_alts, jumps, slide_alts, slides);
+           "flow: alternate moves", "dab jumps %d of %d, knee slides %d of %d", jump_alts, jumps, slide_alts, slides);
     st_ghost = false;
     fresh_save();
 }
@@ -1291,8 +1538,16 @@ void flow_text_fit() {
     auto w = [](const char *s) { return screen.measure_text(s, minimal_font).w; };
     for(auto &it : paint::items)
         expect(w(it.name) <= 80, "flow: text fit", "style name '%s' is %d px", it.name, w(it.name));
+    for(int i = 0; i < paint::ITEMS; i++)
+        expect(w(skin_name(i)) <= 80, "flow: text fit", "look name '%s' is %d px", skin_name(i), w(skin_name(i)));
+    for(const char *s : {"NEED 2500 MORE", "A: BUY 2500", "Y: LOOK  L/R: COLOUR", "B: BACK"})
+        expect(w(s) <= SW - 4, "flow: text fit", "shop line '%s' is %d px", s, w(s));
     int dw = screen.measure_text(INTRO_LINE, outline_font).w;
     expect(dw <= SW - 4, "flow: text fit", "'%s' is %d px", INTRO_LINE, dw);
+    for(const char *h : {"NEW BEST!", "5000 CHILIS"}) {
+        int hw = screen.measure_text(h, outline_font).w;
+        expect(hw <= SW - 4, "flow: text fit", "hype '%s' is %d px", h, hw);
+    }
     char a[40], b[40];
     snprintf(a, sizeof(a), "%lu", 99999999ul);
     expect(3 + w(a) < SW - 47, "flow: text fit", "score %s runs into the heat bar", a);
@@ -1370,8 +1625,11 @@ struct Scene {
     void (*setup)();
 };
 
+bool scene_skins = false;  // scenes with every bought look on
+
 void scene_run_at(float d, int updates) {
     fresh_save();
+    if(scene_skins) shop.skins_owned = shop.skins_on = ALL_SKINS;
     save.best = 18000;
     save.missions_done = 7;
     clock_ms = 50000;
@@ -1426,6 +1684,14 @@ const Scene scenes[] = {
      }},
     {"style", [] { fresh_save(); style_item = 6; style.v[6] = 1; apply_style(); set_state(State::STYLE); steps(30); }},
     {"style_racer", [] { style_item = 7; style.v[7] = 3; apply_style(); steps(10); }},
+    {"shop_need", [] { shop.wallet = 350; open_style(); style_item = 2; style.v[2] = 3; apply_style(); steps(10); }},
+    {"shop_look", [] { shop.wallet = 3120; shop.colours[0] = 0x3; style_item = 0; style.v[0] = 1; apply_style(); open_style(); step(Button::Y); steps(10); }},
+    {"shop_owned", [] { step(Button::A); steps(20); }},
+    {"skins_desert", [] { scene_skins = true; scene_run_at(300.0f, 300); }},
+    {"skins_cars", [] { scene_cars(300.0f); }},
+    {"skins_city", [] { scene_run_at(1150.0f, 300); }},
+    {"skins_volcano", [] { scene_run_at(2000.0f, 300); }},
+    {"skins_reset", [] { scene_skins = false; reset_shop(); to_title(); steps(5); }},
     {"intro_close", [] { style.v[6] = 0; style.v[7] = 0; apply_style(); to_title(); steps(5); step(Button::A); steps(60); }},
     {"intro_shades", [] { steps(INTRO_HIT - 60 - 20); }},
     {"intro_deal", [] { steps(30); }},
@@ -1434,6 +1700,9 @@ const Scene scenes[] = {
     {"intro_turn3", [] { steps(25); }},
     {"cars_desert", [] { scene_cars(300.0f); }},
     {"cars_city", [] { scene_cars(1100.0f); }},
+    {"hype_best", [] { scene_run_at(400.0f, 100); hype = Hype{}; start_hype(HYPE_BEST, "NEW BEST!"); st_ghost = true; steps(45); st_ghost = false; }},
+    {"hype_chilis", [] { scene_run_at(1300.0f, 100); hype = Hype{}; start_hype(HYPE_CHILIS, "500 CHILIS"); st_ghost = true; steps(70); st_ghost = false; }},
+    {"hype_biome", [] { scene_run_at(880.0f, 100); hype = Hype{}; st_ghost = true; for(int i = 0; i < 3000 && !hype_active(HYPE_BIOME); i++) step(); steps(60); st_ghost = false; }},
     {"crash", [] { scene_run_at(150.0f, 100); save.missions[0] = {M_DISTANCE, 0, 0, 200}; crash_now(); steps(15); }},
     {"results", [] { steps(250); }},
     {"pause", [] { scene_run_at(1000.0f, 200); step(Button::MENU); }},
@@ -1494,6 +1763,33 @@ void render_scenes(const char *dir, bool bench) {
 // --clip DIR: a run from `d` metres, one image per drawn frame (every 20 ms),
 // to compare how the road reads in motion. The runner cannot crash here.
 // A negative `d` starts from the title instead: the intro, then the run.
+// --clip-bot: the planning bot steers the clip (lanes, jumps, slides, chilis,
+// a fire dash when the heat bar is full) instead of a straight ghost run; it
+// still passes through anything it cannot plan round, so the clip never ends.
+bool clip_bot = false;
+
+void clip_update(Forecast &fc, int &next_act, long &t) {
+    int act = A_NONE;
+    uint32_t extra = 0;
+    if(clip_bot && state == State::RUN && t % DECIDE == 0) {
+        bool dash_now = run.heat >= 1.0f && !dashing();
+        if(dash_now) extra |= Button::Y;
+        if(next_act >= 0 && !dash_now) {
+            act = next_act;
+            next_act = -1;
+        } else {
+            make_forecast(fc, HORIZON, dash_now);
+            act = plan(run.p, fc, &next_act);
+            if(act < 0) {
+                act = A_NONE;
+                next_act = -1;
+            }
+        }
+    }
+    t++;
+    step(act_buttons(act) | extra);
+}
+
 void render_clip(const char *dir, float d, int frames) {
     if(d < 0.0f) {
         fresh_save();
@@ -1503,15 +1799,198 @@ void render_clip(const char *dir, float d, int frames) {
     } else {
         scene_run_at(d, 1);
     }
+    Forecast fc;
+    int next_act = -1;
+    long t = 0;
     for(int i = 0; i < frames; i++) {
         st_ghost = true;
-        steps(2);
+        clip_update(fc, next_act, t);
+        clip_update(fc, next_act, t);
         ::render(clock_ms);
         char path[512];
         snprintf(path, sizeof(path), "%s/clip%04d.ppm", dir, i);
         write_ppm(path);
     }
     st_ghost = false;
+}
+
+// --- v1.3: the chili shop ----------------------------------------------------
+
+// The 10 STYLE items in menu order: (kind, biome) of each obstacle.
+const Kind shop_kind[paint::ITEMS] = {K_LOW, K_LOW, K_LOW, K_HIGH, K_HIGH, K_HIGH, K_BLOCK, K_BLOCK, K_BLOCK, K_WEED};
+const int shop_biome[paint::ITEMS] = {0, 1, 2, 0, 1, 2, 0, 1, 2, 0};
+
+// Chilis are money: a run adds its chilis to the wallet; colours cost
+// 200/400/800 and a new look 2500; a buy needs the whole price, takes it
+// once and is kept in its own save slot (save2).
+void flow_shop_buy() {
+    fresh_save();
+    expect(shop.wallet == 0 && colour_owned(0, 0) && !colour_owned(0, 1) && !skin_owned(0), "flow: shop new",
+           "a new save has wallet %u, colour 0 %d, colour 1 %d, look %d", shop.wallet, colour_owned(0, 0),
+           colour_owned(0, 1), skin_owned(0));
+    expect(colour_price(1) == 200 && colour_price(2) == 400 && colour_price(3) == 800 && SKIN_PRICE == 2500,
+           "flow: shop prices", "colours %u %u %u, look %u (want 200 400 800, 2500)", colour_price(1), colour_price(2),
+           colour_price(3), SKIN_PRICE);
+    shop.wallet = 199;
+    bool got = buy_colour(0, 1);
+    expect(!got && shop.wallet == 199 && !colour_owned(0, 1), "flow: shop too poor", "199 chilis bought a 200 colour");
+    shop.wallet = 200;
+    got = buy_colour(0, 1);
+    expect(got && shop.wallet == 0 && colour_owned(0, 1), "flow: shop buy", "200 chilis: bought %d, wallet %u", got, shop.wallet);
+    shop.wallet = 1000;
+    got = buy_colour(0, 1);
+    expect(!got && shop.wallet == 1000, "flow: shop buy twice", "an owned colour was sold again (wallet %u)", shop.wallet);
+    shop.wallet = 2499;
+    got = buy_skin(3);
+    expect(!got && !skin_owned(3) && shop.wallet == 2499, "flow: shop too poor", "2499 chilis bought a look");
+    shop.wallet = 2600;
+    got = buy_skin(3);
+    expect(got && skin_owned(3) && skin_on(3) && shop.wallet == 100, "flow: shop buy look",
+           "bought %d, owned %d, worn %d, wallet %u", got, skin_owned(3), skin_on(3), shop.wallet);
+    // kept after a restart
+    memset(&shop, 0, sizeof(shop));
+    load_game();
+    expect(shop.wallet == 100 && colour_owned(0, 1) && skin_owned(3) && skin_on(3), "flow: shop saved",
+           "after reload wallet %u, colour %d, look %d worn %d", shop.wallet, colour_owned(0, 1), skin_owned(3), skin_on(3));
+    // damaged: a look worn but not owned, a colour chosen but not owned
+    shop.skins_on |= 1u << 5;
+    shop.colours[2] = 0;
+    store_shop();
+    style.v[2] = 3;
+    store_style();
+    load_game();
+    expect(!skin_on(5) && colour_owned(2, 0) && style.v[2] == 0 && skin_on(3), "flow: shop repair",
+           "look 5 worn %d, colour 0 owned %d, style %d", skin_on(5), colour_owned(2, 0), style.v[2]);
+    // a run pays its chilis in, once
+    fresh_save();
+    if(!to_running()) return;
+    st_ghost = true;
+    steps(1500);
+    st_ghost = false;
+    run.chilis += 37;  // the ghost runs through, so give it some
+    crash_now();
+    uint32_t chilis = run.chilis;
+    steps(200);
+    step(Button::B);
+    load_game();
+    expect(chilis > 0 && shop.wallet == chilis, "flow: shop earn", "run had %u chilis, wallet %u", chilis, shop.wallet);
+}
+
+// Players from before the shop keep what they had: the wallet starts at
+// every chili they ever collected, and the colours they picked are theirs.
+void flow_shop_migration() {
+    fresh_save();
+    save.total_chilis = 1234;
+    store_game();
+    style.v[3] = 2;
+    store_style();
+    files.erase("save2");
+    memset(&shop, 0, sizeof(shop));
+    load_game();
+    expect(shop.wallet == 1234, "flow: shop migration", "wallet %u, lifetime chilis 1234", shop.wallet);
+    expect(colour_owned(3, 2) && style.v[3] == 2 && !colour_owned(3, 1), "flow: shop migration",
+           "picked colour owned %d (style %d), other colour owned %d", colour_owned(3, 2), style.v[3], colour_owned(3, 1));
+    bool none = true;
+    for(int i = 0; i < paint::ITEMS; i++) none &= !skin_owned(i);
+    expect(none, "flow: shop migration", "a look was free");
+    fresh_save();
+}
+
+// Each bought look replaces its obstacle on the road: same size (so the same
+// hitbox reads right), and the cars' lamps sit where the headlight glow is.
+void flow_shop_skins() {
+    fresh_save();
+    Surface *sh = screen.sprites;
+    for(int i = 0; i < paint::ITEMS; i++) {
+        Rect base = obstacle_rect(shop_kind[i], shop_biome[i], 0);
+        shop.skins_owned |= 1u << i;
+        shop.skins_on |= 1u << i;
+        Rect alt = obstacle_rect(shop_kind[i], shop_biome[i], 0);
+        expect(!same_rect(base, alt) && alt.w == base.w && alt.h == base.h, "flow: shop looks",
+               "%s: look %d,%d %dx%d, classic %d,%d %dx%d", paint::items[i].name, alt.x, alt.y, alt.w, alt.h, base.x,
+               base.y, base.w, base.h);
+        expect(skin_name(i) && *skin_name(i), "flow: shop looks", "item %d has no look name", i);
+        if(i == 6 || i == 7) {  // cars: lamp pixels left and right, near the classic car's
+            int car = i - 6;
+            auto lamps = [&](const Rect &r, float &lx, float &rx, float &y) {
+                int n[2] = {0, 0};
+                float sx[2] = {0, 0}, sy = 0;
+                for(int yy = 0; yy < r.h; yy++)
+                    for(int xx = 0; xx < r.w; xx++) {
+                        uint8_t p = sh->data[(r.y + yy) * sh->bounds.w + r.x + xx];
+                        if(p != lamp_slot[car][0] && p != lamp_slot[car][1]) continue;
+                        int side = xx < r.w / 2 ? 0 : 1;
+                        n[side]++;
+                        sx[side] += float(xx);
+                        sy += float(yy);
+                    }
+                lx = n[0] ? sx[0] / float(n[0]) : -99.0f;
+                rx = n[1] ? sx[1] / float(n[1]) : -99.0f;
+                y = n[0] + n[1] ? sy / float(n[0] + n[1]) : -99.0f;
+            };
+            float bl, br, by, al, ar, ay;
+            lamps(base, bl, br, by);
+            lamps(alt, al, ar, ay);
+            expect(fabsf(al - bl) <= 2.5f && fabsf(ar - br) <= 2.5f && fabsf(ay - by) <= 2.5f, "flow: shop car lamps",
+                   "%s: lamps at %.1f/%.1f y %.1f, classic %.1f/%.1f y %.1f", skin_name(i), double(al), double(ar),
+                   double(ay), double(bl), double(br), double(by));
+        }
+    }
+    // on the road: a run with every look on draws without trouble
+    if(to_running()) {
+        st_ghost = true;
+        steps(600);
+        ::render(clock_ms);
+        st_ghost = false;
+        expect(screen.alpha == 255, "flow: shop looks", "alpha left at %d", int(screen.alpha));
+    }
+    fresh_save();
+}
+
+// The STYLE menu sells: left/right shows every colour, locked ones with their
+// price; A buys what is shown; Y shows the new look; leaving puts back
+// anything not bought.
+void flow_shop_menu() {
+    fresh_save();
+    to_title();
+    steps(5);
+    step(Button::DPAD_DOWN);
+    step(Button::DPAD_DOWN);
+    step(Button::A);
+    expect(state == State::STYLE, "flow: shop menu", "STYLE did not open (state %d)", int(state));
+    style_item = 0;  // the menu remembers its item; start on the fence
+    step(Button::DPAD_RIGHT);  // colour 1, locked, 0 chilis
+    expect(style.v[0] == 1, "flow: shop menu", "a locked colour is not shown (style %d)", style.v[0]);
+    step(Button::A);
+    expect(!colour_owned(0, 1) && shop.wallet == 0, "flow: shop menu", "A bought with no chilis");
+    step(Button::Y);  // look the new look over
+    expect(!skin_on(0), "flow: shop menu", "a look was put on without buying");
+    step(Button::B);
+    expect(state == State::TITLE && style.v[0] == 0 && !skin_on(0), "flow: shop menu",
+           "leaving kept a locked colour (%d) or look (%d)", style.v[0], skin_on(0));
+    // now with chilis: buy colour 2 and the look
+    shop.wallet = 3000;
+    step(Button::A);
+    expect(state == State::STYLE, "flow: shop menu", "STYLE did not reopen");
+    step(Button::DPAD_RIGHT);
+    step(Button::DPAD_RIGHT);
+    step(Button::A);
+    expect(colour_owned(0, 2) && shop.wallet == 2600, "flow: shop menu", "A did not buy colour 2 (wallet %u)", shop.wallet);
+    step(Button::Y);
+    step(Button::A);
+    expect(skin_owned(0) && skin_on(0) && shop.wallet == 100, "flow: shop menu", "A did not buy the look (wallet %u)",
+           shop.wallet);
+    step(Button::B);
+    load_game();
+    expect(style.v[0] == 2 && skin_on(0) && same_rect(obstacle_rect(K_LOW, 0, 0), spr::fence_alt), "flow: shop menu",
+           "after reload colour %d, look %d", style.v[0], skin_on(0));
+    // Y again takes the look off (it stays owned)
+    step(Button::A);
+    step(Button::Y);
+    step(Button::B);
+    expect(skin_owned(0) && !skin_on(0) && same_rect(obstacle_rect(K_LOW, 0, 0), spr::fence), "flow: shop menu",
+           "Y did not switch back to the classic look");
+    fresh_save();
 }
 
 void flows() {
@@ -1535,6 +2014,14 @@ void flows() {
     flow_intro();
     flow_dust_at_feet();
     flow_alt_moves();
+    flow_alt_jump_looks_different();
+    flow_hype();
+    flow_weed_hitbox();
+    flow_weed_settle();
+    flow_shop_buy();
+    flow_shop_migration();
+    flow_shop_skins();
+    flow_shop_menu();
     st_ghost = false;
     fresh_save();
 }
@@ -1609,6 +2096,7 @@ int chili_selftest(int argc, char **argv) {
     int seeds = 24, jobs = 1;
     const char *frames_dir = nullptr, *clip_dir = nullptr;
     float clip_from = 600.0f;
+    int clip_frames = 0;
     bool bench = false, flows_only = false;
 #ifdef __unix__
     jobs = std::max(1, std::min(16, int(sysconf(_SC_NPROCESSORS_ONLN))));
@@ -1622,9 +2110,11 @@ int chili_selftest(int argc, char **argv) {
         else if(!strcmp(argv[i], "--bench")) bench = true;
         else if(!strcmp(argv[i], "--clip") && i + 1 < argc) clip_dir = argv[++i];
         else if(!strcmp(argv[i], "--clip-from") && i + 1 < argc) clip_from = float(atof(argv[++i]));
+        else if(!strcmp(argv[i], "--clip-bot")) st::clip_bot = true;
+        else if(!strcmp(argv[i], "--clip-frames") && i + 1 < argc) clip_frames = atoi(argv[++i]);
         else if(!strcmp(argv[i], "--flows")) flows_only = true;
         else {
-            printf("usage: chili-rush-selftest [--seeds N] [--quick] [--jobs N] [-v] [--flows] [--frames DIR] [--bench] [--clip DIR [--clip-from M]]\n");
+            printf("usage: chili-rush-selftest [--seeds N] [--quick] [--jobs N] [-v] [--flows] [--frames DIR] [--bench] [--clip DIR [--clip-from M] [--clip-bot] [--clip-frames N]]\n");
             return 2;
         }
     }
@@ -1633,7 +2123,7 @@ int chili_selftest(int argc, char **argv) {
     ::init();
     save.seen_help = 1;
     if(clip_dir) {
-        st::render_clip(clip_dir, clip_from, clip_from < 0.0f ? 400 : 250);
+        st::render_clip(clip_dir, clip_from, clip_frames > 0 ? clip_frames : clip_from < 0.0f ? 400 : 250);
         return 0;
     }
     if(frames_dir || bench) {

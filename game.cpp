@@ -341,16 +341,102 @@ void reset_style() {
 
 void store_style() { write_save(style, 1); }
 
+// The chili shop: chilis from every run go into a wallet; colours past the
+// first and a second look for each obstacle are bought with them. Own save
+// slot (2), so older saves keep working; it starts from the lifetime chilis.
+constexpr uint32_t SHOP_MAGIC = 0x504f4853; // "SHOP"
+constexpr uint32_t SKIN_PRICE = 2500;
+constexpr uint16_t ALL_SKINS = uint16_t((1u << paint::ITEMS) - 1u);
+struct ShopData {
+    uint32_t magic;
+    uint32_t wallet;
+    uint8_t colours[paint::ITEMS];  // bit v: colour v owned (bit 0 always)
+    uint16_t skins_owned;           // bit i: item i's new look bought
+    uint16_t skins_on;              // bit i: item i wears it
+    uint8_t pad[2];
+};
+ShopData shop;
+
+uint32_t colour_price(int v) {
+    static const uint32_t price[paint::VARIANTS] = {0, 200, 400, 800};
+    return v >= 0 && v < paint::VARIANTS ? price[v] : 0;
+}
+bool colour_owned(int item, int v) { return v == 0 || (shop.colours[item] >> v) & 1u; }
+bool skin_owned(int item) { return (shop.skins_owned >> item) & 1u; }
+bool skin_on(int item) { return (shop.skins_on >> item) & 1u; }
+
+const char *skin_name(int item) {
+    static const char *names[paint::ITEMS] = {"HAY BALES", "ROADWORKS",  "BONE PILE", "RANCH GATE", "SKY BRIDGE",
+                                              "RIB ARCH",  "CAMPER VAN", "TAXI",      "CRYSTALS",   "OLD TYRE"};
+    return item >= 0 && item < paint::ITEMS ? names[item] : "";
+}
+
+void store_shop() { write_save(shop, 2); }
+
+bool spend(uint32_t price) {
+    if(shop.wallet < price) return false;
+    shop.wallet -= price;
+    return true;
+}
+
+bool buy_colour(int item, int v) {
+    if(colour_owned(item, v) || !spend(colour_price(v))) return false;
+    shop.colours[item] |= uint8_t(1u << v);
+    store_shop();
+    return true;
+}
+
+// a bought look goes on straight away
+bool buy_skin(int item) {
+    if(skin_owned(item) || !spend(SKIN_PRICE)) return false;
+    shop.skins_owned |= uint16_t(1u << item);
+    shop.skins_on |= uint16_t(1u << item);
+    store_shop();
+    return true;
+}
+
+void reset_shop() {
+    memset(&shop, 0, sizeof(shop));
+    shop.magic = SHOP_MAGIC;
+    for(auto &c : shop.colours) c = 1;
+}
+
+// No shop yet (a save from before it): the wallet starts at every chili ever
+// collected, and the colours already picked in STYLE are owned.
+void migrate_shop() {
+    reset_shop();
+    shop.wallet = save.total_chilis;
+    for(int i = 0; i < paint::ITEMS; i++) shop.colours[i] |= uint8_t(1u << (style.v[i] & 3u));
+    store_shop();
+}
+
+void repair_shop() {
+    for(auto &c : shop.colours) c = uint8_t((c & 0x0f) | 1);
+    shop.skins_owned &= ALL_SKINS;
+    shop.skins_on &= shop.skins_owned;
+    for(int i = 0; i < paint::ITEMS; i++)
+        if(!colour_owned(i, style.v[i])) style.v[i] = 0;
+}
+
+void earn(uint32_t chilis) {
+    shop.wallet = shop.wallet > UINT32_MAX - chilis ? UINT32_MAX : shop.wallet + chilis;
+}
+
 void load_game() {
     if(!read_save(save) || save.magic != SAVE_MAGIC || save.version != SAVE_VERSION) reset_save();
     repair_save();
     if(!read_save(style, 1) || style.magic != STYLE_MAGIC) reset_style();
     for(auto &v : style.v)
         if(v >= paint::VARIANTS) v = 0;
+    if(!read_save(shop, 2) || shop.magic != SHOP_MAGIC) migrate_shop();
+    repair_shop();
     apply_style();
 }
 
-void store_game() { write_save(save); }
+void store_game() {
+    write_save(save);
+    store_shop();  // the wallet moves with the run totals
+}
 
 // Rank: one star per three missions, each star adds +1 to the base multiplier.
 int rank() { return int(std::min<uint32_t>(save.missions_done / 3, 20)); }
@@ -385,6 +471,7 @@ struct Obj {
     float h;          // height above the road (pickups on jump arcs)
     float vx;         // lateral speed (tumbleweed)
     float target_x;   // tumbleweed: lane it rolls to
+    float from_x;     // tumbleweed that settles: lane it starts from
     bool collected;
     bool smashed;
     float fly;        // smashed: time since smash
@@ -453,6 +540,16 @@ void emit(float x, float y, float vx, float vy, float life, Pen pen, uint8_t siz
         }
     }
 }
+
+// Big moments: a short burst of flames, hit markers and a bouncing line
+enum HypeKind : uint8_t { HYPE_NONE, HYPE_CLOSE, HYPE_BIOME, HYPE_CHILIS, HYPE_BEST };
+struct Hype {
+    HypeKind kind;
+    float t;  // seconds left
+    char text[16];
+};
+Hype hype;
+[[maybe_unused]] bool hype_active(HypeKind k) { return hype.kind == k && hype.t > 0.0f; }
 
 void burst(float x, float y, int n, Pen pen, float speed = 40.0f, uint8_t size = 1) {
     for(int i = 0; i < n; i++) {
@@ -752,6 +849,7 @@ void spawn_row(float s) {
     Kind lane_kind[3] = {K_NONE, K_NONE, K_NONE};
 
     bool weed = false;
+    int settle_lane = -1;
     int pattern = rnd_int(100);
     if(total_distance(run.distance) < 120.0f) {
         // first rows of a run: one easy obstacle at a time, to warm up
@@ -775,13 +873,25 @@ void spawn_row(float s) {
     } else {
         // a tumbleweed rolling across, plus maybe a sign in the middle lane
         weed = true;
-        int from = chance(0.5f) ? 0 : 2;
-        Obj *w = spawn(K_WEED, lane_x(from), s);
-        if(w) {
-            w->target_x = lane_x(2 - from);
-            w->vx = (w->target_x - w->x) / 1.6f;  // crosses the road in 1.6 s
+        if(d > 0.25f && chance(0.35f)) {
+            // ...or one that rolls into the lane of a chili line and stays
+            settle_lane = rnd_int(3);
+            int from = settle_lane == 1 ? (chance(0.5f) ? 0 : 2) : 2 - settle_lane;
+            Obj *w = spawn(K_WEED, lane_x(from), s);
+            if(w) {
+                w->art = 1;
+                w->from_x = lane_x(from);
+                w->target_x = lane_x(settle_lane);
+            }
+        } else {
+            int from = chance(0.5f) ? 0 : 2;
+            Obj *w = spawn(K_WEED, lane_x(from), s);
+            if(w) {
+                w->target_x = lane_x(2 - from);
+                w->vx = (w->target_x - w->x) / 1.6f;  // crosses the road in 1.6 s
+            }
+            if(d > 0.3f && chance(0.5f)) lane_kind[1] = K_HIGH;
         }
-        if(d > 0.3f && chance(0.5f)) lane_kind[1] = K_HIGH;
     }
 
     for(int l = 0; l < 3; l++)
@@ -792,7 +902,13 @@ void spawn_row(float s) {
     for(int l = 0; l < 3; l++)
         if(lane_kind[l] == K_NONE) free_lanes[nf++] = l;
     int line_lane = -1;
-    if(nf > 0 && chance(0.75f)) {
+    if(settle_lane >= 0) {
+        // the bait: chilis right up to where the tumbleweed stops
+        line_lane = settle_lane;
+        float end = s - (HIT_DEPTH + 0.4f);
+        int n = std::max(2, std::min(5, int((min_gap() * 0.9f - (HIT_DEPTH + 0.4f)) / 0.7f) + 1));
+        chili_line(line_lane, end - float(n - 1) * 0.7f, n, 0.7f);
+    } else if(nf > 0 && chance(0.75f)) {
         line_lane = free_lanes[rnd_int(nf)];
         // stays clear of the next row, which is at least min_gap() * 1.1 away
         int most = int(min_gap() * 1.4f / 0.7f);
@@ -969,6 +1085,7 @@ void record_run() {
     run.recorded = true;
     save.runs++;
     save.total_chilis += run.chilis;
+    earn(run.chilis);
     save.best_distance = std::max(save.best_distance, run_metres());
     save.best = std::max(save.best, run.score);
 }
@@ -994,6 +1111,38 @@ void finish_run_save() {
 }
 
 // ---------------------------------------------------------------------------
+// Hype: a short "wow" for big moments. A bigger moment replaces a smaller one
+// still playing; a smaller one waits its turn (it is simply skipped).
+float hype_length(HypeKind k) {
+    switch(k) {
+        case HYPE_CLOSE: return 0.7f;
+        case HYPE_BIOME: return 1.6f;
+        case HYPE_CHILIS: return 1.8f;
+        case HYPE_BEST: return 2.2f;
+        default: return 0.0f;
+    }
+}
+
+void start_hype(HypeKind k, const char *text) {
+    if(attract) return;
+    if(hype.t > 0.0f && hype.kind > k) return;
+    hype.kind = k;
+    hype.t = hype_length(k);
+    snprintf(hype.text, sizeof(hype.text), "%s", text);
+    if(k >= HYPE_BIOME) {
+        run.shake = std::max(run.shake, k == HYPE_BIOME ? 0.25f : 0.4f);
+        run.flash = std::max(run.flash, 0.18f);
+        run.flash_pen = Pen(255, 150, 40);
+    }
+    if(k == HYPE_BEST || k == HYPE_CHILIS) world_sfx(audio::Sfx::AIRHORN);
+}
+
+// chilis in one run that get a hype
+bool chili_milestone(uint32_t n) {
+    return n == 100 || n == 200 || n == 500 || n == 1000 || n == 2000 || n == 5000;
+}
+
+// ---------------------------------------------------------------------------
 // Update: one run step
 
 void collect(Obj &o) {
@@ -1003,6 +1152,11 @@ void collect(Obj &o) {
     switch(o.kind) {
         case K_CHILI: {
             run.chilis++;
+            if(chili_milestone(run.chilis)) {
+                char buf[16];
+                snprintf(buf, sizeof(buf), "%u CHILIS", unsigned(run.chilis));
+                start_hype(HYPE_CHILIS, buf);
+            }
             run.combo++;
             run.best_combo = std::max(run.best_combo, run.combo);
             run.heat = std::min(1.0f, run.heat + (dashing() ? 0.0f : 0.025f));
@@ -1051,13 +1205,30 @@ bool clears(const Body &b, Kind k) {
 
 
 // Does the obstacle hit a body whose feet are at `distance`?
+// A tumbleweed is a 16 px ball, not a lane-wide obstacle: it hits when it
+// overlaps the runner's body (12 px between centres at the runner's depth).
+constexpr float WEED_HIT = 12.0f / float(PLAYER_FEET_Y - HORIZON);
+
 bool hits(const Body &b, const Obj &o, float distance) {
-    return is_obstacle(o.kind) && fabsf(o.s - distance) < HIT_DEPTH && in_lane_of(o, b.x) && !clears(b, o.kind);
+    bool lane = o.kind == K_WEED ? fabsf(o.x - b.x) < WEED_HIT : in_lane_of(o, b.x);
+    return is_obstacle(o.kind) && fabsf(o.s - distance) < HIT_DEPTH && lane && !clears(b, o.kind);
 }
+
+// Now and then a tumbleweed rolls into the lane of a chili line and stops
+// there (art 1), well before it reaches the runner.
+constexpr float WEED_SETTLE_FROM = 28.0f;            // depth where it starts to roll over
+constexpr float WEED_SETTLE_AT = Z_PLAYER + 10.0f;   // depth where it has stopped
+bool weed_settles(const Obj &o) { return o.kind == K_WEED && o.art == 1; }
 
 // Tumbleweed: starts rolling once it is close enough to be seen (depth z),
 // then rolls from side to side.
 void roll_weed(Obj &o, float z) {
+    if(weed_settles(o)) {
+        float f = clampf((WEED_SETTLE_FROM - z) / (WEED_SETTLE_FROM - WEED_SETTLE_AT), 0.0f, 1.0f);
+        f = f * f * (3.0f - 2.0f * f);
+        o.x = o.from_x + (o.target_x - o.from_x) * f;
+        return;
+    }
     if(z >= 16.0f) return;
     o.x += o.vx * DT;
     if((o.vx > 0.0f && o.x > o.target_x) || (o.vx < 0.0f && o.x < o.target_x)) {
@@ -1170,6 +1341,7 @@ void update_objects() {
                     add_score(uint32_t(25 * multiplier()));
                     world_sfx(audio::Sfx::NEAR_MISS);
                     popup("CLOSE!", 64, 70, Pen(120, 230, 255));
+                    start_hype(HYPE_CLOSE, "");
                     run.heat = std::min(1.0f, run.heat + 0.06f);
                 }
             }
@@ -1315,6 +1487,7 @@ void update_run(bool input) {
     if(b != run.last_biome) {
         run.last_biome = b;
         run.biome_banner = 2.0f;
+        start_hype(HYPE_BIOME, "");
     }
     if(run.biome_banner > 0.0f) run.biome_banner -= DT;
 
@@ -1324,12 +1497,38 @@ void update_run(bool input) {
         if(!run.new_best && best_at_start > 0 && run.score > best_at_start) {
             run.new_best = true;
             world_sfx(audio::Sfx::NEW_BEST);
-            popup("NEW BEST!", 64, 46, Pen(255, 240, 120));
+            start_hype(HYPE_BEST, "NEW BEST!");
+        }
+    }
+}
+
+void update_hype() {
+    if(hype.t <= 0.0f) {
+        hype.kind = HYPE_NONE;
+        return;
+    }
+    float total = hype_length(hype.kind);
+    float age = total - hype.t;
+    hype.t -= DT;
+    if(hype.kind == HYPE_CLOSE) {
+        // sparks off the runner's shoulder
+        if(age < 0.25f)
+            emit(player_screen_x() + float(rnd_int(12) - 6), float(PLAYER_FEET_Y - 14), float(rnd_int(80) - 40),
+                 -40.0f - float(rnd_int(40)), 0.3f, rnd_int(2) ? Pen(255, 255, 255) : Pen(120, 230, 255));
+        return;
+    }
+    // embers flying up out of the flames
+    if(age < total * 0.7f) {
+        for(int i = 0; i < 3; i++) {
+            Pen pen = rnd_int(3) == 0 ? Pen(255, 240, 140) : rnd_int(2) ? Pen(255, 150, 30) : Pen(240, 60, 20);
+            emit(float(rnd_int(SW)), float(SH - 4), float(rnd_int(30) - 15), -90.0f - float(rnd_int(70)), 0.5f, pen,
+                 uint8_t(1 + rnd_int(2)));
         }
     }
 }
 
 void update_effects() {
+    update_hype();
     for(auto &p : particles) {
         if(p.life <= 0.0f) continue;
         p.life -= DT;
@@ -1555,12 +1754,31 @@ void render_road() {
 // ---------------------------------------------------------------------------
 // Rendering: sprites
 
-const Rect &obstacle_rect(Kind k, int biome, uint32_t time) {
+// The STYLE item of an obstacle, -1 for the rest: the low, high and block
+// obstacle of each biome, then the tumbleweed (paint.hpp has the same order).
+int paint_item(Kind k, int biome) {
     switch(k) {
-        case K_LOW:   return biome == 1 ? spr::cart : biome == 2 ? spr::barrier : spr::fence;
-        case K_HIGH:  return biome == 1 ? spr::banner_city : biome == 2 ? spr::banner_lava : spr::banner;
-        case K_BLOCK: return biome == 1 ? spr::car_city : biome == 2 ? spr::spire : spr::car_desert;
-        case K_WEED:  return spr::weed[(time / 90u) & 1u];
+        case K_LOW: return biome;
+        case K_HIGH: return 3 + biome;
+        case K_BLOCK: return 6 + biome;
+        case K_WEED: return 9;
+        default: return -1;
+    }
+}
+
+// The obstacle's art in its classic look or its bought one.
+const Rect &obstacle_look(Kind k, int biome, uint32_t time, bool alt) {
+    switch(k) {
+        case K_LOW:
+            if(alt) return biome == 1 ? spr::cart_alt : biome == 2 ? spr::barrier_alt : spr::fence_alt;
+            return biome == 1 ? spr::cart : biome == 2 ? spr::barrier : spr::fence;
+        case K_HIGH:
+            if(alt) return biome == 1 ? spr::banner_city_alt : biome == 2 ? spr::banner_lava_alt : spr::banner_alt;
+            return biome == 1 ? spr::banner_city : biome == 2 ? spr::banner_lava : spr::banner;
+        case K_BLOCK:
+            if(alt) return biome == 1 ? spr::car_city_alt : biome == 2 ? spr::spire_alt : spr::car_desert_alt;
+            return biome == 1 ? spr::car_city : biome == 2 ? spr::spire : spr::car_desert;
+        case K_WEED: return alt ? spr::weed_alt[(time / 90u) & 1u] : spr::weed[(time / 90u) & 1u];
         case K_CHILI: return spr::chili[(time / 200u) & 1u];
         case K_GOLDEN: return spr::golden;
         case K_MILK: return spr::milk;
@@ -1568,6 +1786,11 @@ const Rect &obstacle_rect(Kind k, int biome, uint32_t time) {
         default: break;
     }
     return spr::rock;
+}
+
+const Rect &obstacle_rect(Kind k, int biome, uint32_t time) {
+    int item = paint_item(k, biome);
+    return obstacle_look(k, biome, time, item >= 0 && skin_on(item));
 }
 
 const Rect &decor_rect(int biome, int art) {
@@ -1658,7 +1881,7 @@ void draw_beams(const Obj &o, float z, bool full) {
     }
 }
 
-// Halo round each lamp; full beams add a lens streak and glare as they near.
+// Halo round each lamp; full beams add glare as they near.
 void draw_glow(const Obj &o, float z, bool full) {
     float hgt = lamp_height(o.biome);
     Pen pen = beam_pen(o.biome);
@@ -1677,12 +1900,6 @@ void draw_glow(const Obj &o, float z, bool full) {
         }
         screen.pen = Pen(255, 255, 255, uint8_t(220.0f * a));
         screen.pixel(c);
-        if(full) {
-            int w = int(18.0f * l.scale) + 1;
-            pen.a = uint8_t(80.0f * a);
-            screen.pen = pen;
-            screen.h_span(Point(c.x - w, c.y), w * 2 + 1);
-        }
     }
     if(full) {
         // dazzle: the whole screen brightens a little as full beams get close
@@ -1754,7 +1971,7 @@ const Rect *player_frame(uint32_t time) {
     if(dashing()) return &spr::dash[(time / 80u) & 1u];
     if(in_air()) {
         float t = run.p.jump_t / JUMP_TIME;
-        if(run.jump_alt) return t < 0.22f ? &spr::jump_up_alt : (t < 0.62f ? &spr::jump_alt : &spr::jump_down);
+        if(run.jump_alt) return t < 0.22f ? &spr::jump_up_alt : (t < 0.62f ? &spr::jump_alt : &spr::jump_down_alt);
         return t < 0.22f ? &spr::jump_up : (t < 0.62f ? &spr::jump : &spr::jump_down);
     }
     if(sliding()) {
@@ -1882,6 +2099,61 @@ void render_hud(uint32_t time) {
 
     if(run.biome_banner > 0.0f && ((time / 150u) & 1u || run.biome_banner < 1.5f)) {
         text_shadow(biomes[run.last_biome].name, outline_font, Point(64, 26), Pen(255, 255, 255), TextAlign::center_center);
+    }
+}
+
+// A white "hit marker": four short diagonal strokes round a gap
+void hit_marker(int x, int y, int r) {
+    screen.pen = Pen(255, 255, 255);
+    for(int i = 2; i <= r; i++) {
+        screen.pixel(Point(x - i, y - i));
+        screen.pixel(Point(x + i, y - i));
+        screen.pixel(Point(x - i, y + i));
+        screen.pixel(Point(x + i, y + i));
+    }
+}
+
+void render_hype(uint32_t time) {
+    if(hype.t <= 0.0f || hype.kind == HYPE_NONE) return;
+    float total = hype_length(hype.kind);
+    float age = total - hype.t;
+    if(hype.kind == HYPE_CLOSE) {
+        if(age < 0.3f) hit_marker(int(player_screen_x()) + 9, PLAYER_FEET_Y - 18, 4);
+        return;
+    }
+    // a wall of flames rising from the bottom edge, up and back down
+    float env = sinf(clampf(age / total, 0.0f, 1.0f) * 3.14159265f);
+    for(int x = 0; x < SW; x++) {
+        uint32_t h1 = hash32(uint32_t(x / 3) * 7919u + (time / 70u));
+        float flick = float(h1 % 100u) / 100.0f;
+        int h = int(env * (12.0f + 14.0f * flick + 6.0f * sinf(float(x) * 0.31f + float(time) * 0.012f)));
+        if(h <= 0) continue;
+        int top = SH - h;
+        screen.pen = Pen(240, 50, 20, 210);
+        screen.v_span(Point(x, top), h);
+        if(h > 4) {
+            screen.pen = Pen(255, 150, 30, 220);
+            screen.v_span(Point(x, top + h / 4), h - h / 4);
+        }
+        if(h > 10) {
+            screen.pen = Pen(255, 235, 120, 230);
+            screen.v_span(Point(x, top + h / 2 + 2), h - h / 2 - 2);
+        }
+    }
+    // hit markers popping round the screen
+    if((hype.kind == HYPE_BEST || hype.kind == HYPE_CHILIS) && age < 1.0f) {
+        uint32_t beat = time / 120u;
+        for(int i = 0; i < 3; i++) {
+            uint32_t h = hash32(beat * 31u + uint32_t(i) * 977u);
+            hit_marker(16 + int(h % 96u), 30 + int((h >> 8) % 60u), 3 + int((h >> 16) % 3u));
+        }
+    }
+    // the line bounces in, then sits and flickers like fire
+    if(hype.text[0]) {
+        float in = clampf(age / 0.25f, 0.0f, 1.0f);
+        int y = 40 - int((1.0f - in) * 30.0f) + int(sinf(age * 18.0f) * 3.0f * (1.0f - clampf(age / 0.8f, 0.0f, 1.0f)));
+        static const Pen fire[3] = {Pen(255, 240, 120), Pen(255, 170, 40), Pen(255, 255, 255)};
+        text_shadow(hype.text, outline_font, Point(64, y), fire[(time / 90u) % 3u], TextAlign::top_center);
     }
 }
 
@@ -2053,19 +2325,100 @@ void render_settings(uint32_t time) {
 }
 
 // ---------------------------------------------------------------------------
-// STYLE menu: four colours for every obstacle
+// STYLE menu: four colours and two looks for every obstacle, bought with chilis
 
 int style_item = 0;
+uint16_t look_shown = 0;               // items showing their new look in the menu
+uint8_t style_kept[paint::ITEMS];      // last owned colour of each item
+
+void open_style() {
+    look_shown = shop.skins_on;
+    memcpy(style_kept, style.v, sizeof(style_kept));
+}
+
+bool shows_look(int item) { return (look_shown >> item) & 1u; }
+
+// What A would buy for the item shown: its look, else its colour (0 = nothing).
+uint32_t style_price(int item) {
+    if(shows_look(item) && !skin_owned(item)) return SKIN_PRICE;
+    if(!colour_owned(item, style.v[item])) return colour_price(style.v[item]);
+    return 0;
+}
 
 const Rect &style_rect(int item, uint32_t time) {
     static const Kind kinds[3] = {K_LOW, K_HIGH, K_BLOCK};
-    if(item == 9) return obstacle_rect(K_WEED, 0, time);
-    return obstacle_rect(kinds[item / 3], item % 3, time);
+    if(item == 9) return obstacle_look(K_WEED, 0, time, shows_look(item));
+    return obstacle_look(kinds[item / 3], item % 3, time, shows_look(item));
+}
+
+// Leaving the menu: colours not bought go back to the last owned one.
+void close_style() {
+    for(int i = 0; i < paint::ITEMS; i++)
+        if(!colour_owned(i, style.v[i])) style.v[i] = style_kept[i];
+    apply_style();
+    store_style();
+}
+
+void update_style_menu() {
+    const int item = style_item;
+    if(buttons.pressed & Button::DPAD_UP) {
+        style_item = (style_item + paint::ITEMS - 1) % paint::ITEMS;
+        audio::sfx(audio::Sfx::MENU_MOVE);
+    }
+    if(buttons.pressed & Button::DPAD_DOWN) {
+        style_item = (style_item + 1) % paint::ITEMS;
+        audio::sfx(audio::Sfx::MENU_MOVE);
+    }
+    int dv = 0;
+    if(buttons.pressed & Button::DPAD_RIGHT) dv = 1;
+    if(buttons.pressed & Button::DPAD_LEFT) dv = paint::VARIANTS - 1;
+    if(dv) {
+        style.v[item] = uint8_t((style.v[item] + dv) % paint::VARIANTS);
+        if(colour_owned(item, style.v[item])) {
+            style_kept[item] = style.v[item];
+            store_style();
+        }
+        apply_style();
+        audio::sfx(audio::Sfx::MENU_MOVE);
+    }
+    if(buttons.pressed & (Button::X | Button::Y)) {
+        look_shown ^= uint16_t(1u << item);
+        if(skin_owned(item)) {
+            shop.skins_on = uint16_t((shop.skins_on & ~(1u << item)) | (look_shown & (1u << item)));
+            store_shop();
+        }
+        audio::sfx(audio::Sfx::MENU_MOVE);
+    }
+    if(buttons.pressed & Button::A) {
+        uint32_t price = style_price(item);
+        bool bought = false;
+        if(price && shows_look(item) && !skin_owned(item)) bought = buy_skin(item);
+        else if(price) {
+            bought = buy_colour(item, style.v[item]);
+            if(bought) {
+                style_kept[item] = style.v[item];
+                store_style();
+            }
+        }
+        if(bought) {
+            audio::sfx(audio::Sfx::MISSION);
+            run.flash = 0.15f;
+            run.flash_pen = Pen(255, 200, 60);
+        } else if(price) {
+            audio::sfx(audio::Sfx::SHIELD_POP);
+        }
+    }
 }
 
 void render_style(uint32_t time) {
     dim(170);
     text_shadow("STYLE", outline_font, Point(64, 3), Pen(255, 220, 90), TextAlign::top_center);
+    // the wallet, top right
+    char money[16];
+    snprintf(money, sizeof(money), "%lu", (unsigned long)shop.wallet);
+    int mw = screen.measure_text(money, minimal_font).w;
+    screen.blit(screen.sprites, spr::hud_chili, Point(SW - 3 - mw - 9, 3));
+    text_shadow(money, minimal_font, Point(SW - 2, 4), Pen(255, 220, 120), TextAlign::top_right);
     // preview on a little stage
     Rect box(20, 18, 88, 62);
     screen.pen = Pen(255, 255, 255, 24);
@@ -2079,7 +2432,11 @@ void render_style(uint32_t time) {
     draw_scaled(r, float(box.x + box.w / 2), float(box.y + box.h - 4), sc);
     // name, position and arrows
     char buf[24];
-    text_shadow(paint::items[style_item].name, minimal_font, Point(64, 84), Pen(255, 255, 255), TextAlign::top_center);
+    const bool look = shows_look(style_item);
+    text_shadow(look ? skin_name(style_item) : paint::items[style_item].name, minimal_font, Point(64, 84),
+                look ? Pen(255, 220, 90) : Pen(255, 255, 255), TextAlign::top_center);
+    if(look && !skin_owned(style_item))
+        text_shadow("NEW LOOK", minimal_font, Point(64, box.y + 2), Pen(255, 160, 60), TextAlign::top_center);
     snprintf(buf, sizeof(buf), "%d/%d", style_item + 1, paint::ITEMS);
     text_shadow(buf, minimal_font, Point(box.x + box.w - 2, box.y + 2), Pen(170, 160, 190), TextAlign::top_right);
     int bounce = int((time / 200u) & 1u);
@@ -2100,8 +2457,28 @@ void render_style(uint32_t time) {
             screen.pen = pen_rgb(it.rgb[v][idx]);
             screen.rectangle(Rect(sw.x + k * 6, sw.y - (on ? bounce : 0), 6, sw.h));
         }
+        if(!colour_owned(style_item, v)) {  // locked: dimmed, with a little padlock
+            screen.pen = Pen(0, 0, 0, 150);
+            screen.rectangle(Rect(sw.x, sw.y - (on ? bounce : 0), sw.w, sw.h));
+            screen.pen = Pen(230, 230, 240);
+            int lx = sw.x + sw.w / 2 - 2, ly = sw.y - (on ? bounce : 0) + 4;
+            screen.rectangle(Rect(lx, ly, 5, 4));
+            screen.h_span(Point(lx + 1, ly - 2), 3);
+            screen.pixel(Point(lx, ly - 1));
+            screen.pixel(Point(lx + 4, ly - 1));
+        }
     }
-    text_shadow("UP/DOWN: ITEM  L/R: COLOUR", minimal_font, Point(64, SH - 18), Pen(200, 190, 210), TextAlign::top_center);
+    // what A does here
+    uint32_t price = style_price(style_item);
+    if(price && shop.wallet >= price) {
+        snprintf(buf, sizeof(buf), "A: BUY %lu", (unsigned long)price);
+        text_shadow(buf, minimal_font, Point(64, SH - 18), Pen(120, 255, 140), TextAlign::top_center);
+    } else if(price) {
+        snprintf(buf, sizeof(buf), "NEED %lu MORE", (unsigned long)(price - shop.wallet));
+        text_shadow(buf, minimal_font, Point(64, SH - 18), Pen(255, 120, 100), TextAlign::top_center);
+    } else {
+        text_shadow("Y: LOOK  L/R: COLOUR", minimal_font, Point(64, SH - 18), Pen(200, 190, 210), TextAlign::top_center);
+    }
     if((time / 500u) & 1u) text_shadow("B: BACK", minimal_font, Point(64, SH - 9), Pen(200, 190, 210), TextAlign::top_center);
 }
 
@@ -2109,10 +2486,12 @@ void render_style(uint32_t time) {
 // Start-of-run camera move: a close-up of the hero facing us, the shades
 // drop onto its face, then the camera swings round behind it.
 
-constexpr int INTRO_TICKS = 300;
-constexpr int INTRO_DROP = 70;    // shades start falling
-constexpr int INTRO_HIT = 110;    // shades land
-constexpr int INTRO_ORBIT = 170;  // camera starts to swing round
+// the whole move runs at 1.3x the length of its first version (3 s -> 3.9 s)
+constexpr int INTRO_TICKS = 390;
+constexpr int INTRO_DROP = 91;    // shades start falling
+constexpr int INTRO_HIT = 143;    // shades land
+constexpr int INTRO_ORBIT = 221;  // camera starts to swing round
+constexpr int INTRO_HOLD = 26;    // the camera rests behind the hero before the countdown
 constexpr const char *INTRO_LINE = "DEAL WITH IT";
 constexpr float INTRO_SCALE = 3.5f;
 constexpr float INTRO_FEET_Y = 100.0f;
@@ -2123,7 +2502,7 @@ float smooth(float t) {
 }
 
 // 0 at the start of the swing, 1 when the camera is behind the hero
-float intro_orbit() { return smooth(float(state_ticks - INTRO_ORBIT) / float(INTRO_TICKS - INTRO_ORBIT - 20)); }
+float intro_orbit() { return smooth(float(state_ticks - INTRO_ORBIT) / float(INTRO_TICKS - INTRO_ORBIT - INTRO_HOLD)); }
 
 // how far the camera has turned, for the scenery and the road
 void intro_camera(float &pan, float &dx) {
@@ -2132,6 +2511,21 @@ void intro_camera(float &pan, float &dx) {
     dx = sinf(a * 3.14159265f) * 38.0f;
 }
 
+// the scroll the hills and the sun are drawn at: the run's own, plus the
+// intro's camera swing while it plays
+float scenery_scroll() {
+    float s = run.bg_scroll;
+    if(state == State::INTRO) {
+        float pan, dx;
+        intro_camera(pan, dx);
+        s += pan;
+    }
+    return s;
+}
+
+// the "DEAL WITH IT" line is on screen
+bool intro_line_shown(int t) { return t >= INTRO_HIT && t < INTRO_ORBIT + INTRO_HOLD; }
+
 void render_intro(uint32_t time) {
     int t = state_ticks;
     float a = intro_orbit();
@@ -2139,7 +2533,7 @@ void render_intro(uint32_t time) {
     float sc = zoom + (1.0f - zoom) * a;
     float px = 64.0f + view_dx * (1.0f - a);
     float py = INTRO_FEET_Y + (float(PLAYER_FEET_Y) - INTRO_FEET_Y) * a;
-    if(t >= INTRO_HIT && t < INTRO_ORBIT) py += sinf(float(t - INTRO_HIT) * 0.25f) * 1.5f * (1.0f - float(t - INTRO_HIT) / 60.0f);
+    if(t >= INTRO_HIT && t < INTRO_ORBIT) py += sinf(float(t - INTRO_HIT) * 0.19f) * 1.5f * fmaxf(0.0f, 1.0f - float(t - INTRO_HIT) / 78.0f);
     // the hero turns as the camera swings: front, three quarters, side, three quarters, back
     float deg = a * 180.0f;
     const Rect *fr = deg < 22.0f ? &spr::intro_front : deg < 66.0f ? &spr::intro_q1 : deg < 112.0f ? &spr::intro_side
@@ -2160,16 +2554,16 @@ void render_intro(uint32_t time) {
         screen.stretch_blit(screen.sprites, *sh, Rect(int(px - float(w) * 0.5f), int(top), w, h));
     }
     // letterbox bars that slide away at the end
-    int bar = int(12.0f * (1.0f - smooth(float(t - (INTRO_TICKS - 40)) / 40.0f)));
+    int bar = int(12.0f * (1.0f - smooth(float(t - (INTRO_TICKS - 52)) / 52.0f)));
     if(bar > 0) {
         screen.pen = Pen(0, 0, 0);
         screen.rectangle(Rect(0, 0, SW, bar));
         screen.rectangle(Rect(0, SH - bar, SW, bar));
     }
-    if(t >= INTRO_HIT && t < INTRO_ORBIT + 20) {
+    if(intro_line_shown(t)) {
         int k = t - INTRO_HIT;
-        int y = SH - 24 + (k < 6 ? (6 - k) * 2 : 0);
-        Pen pen = ((time / 80u) & 1u) ? Pen(255, 255, 255) : Pen(255, 230, 90);
+        int y = SH - 24 + (k < 8 ? (8 - k) * 3 / 2 : 0);
+        Pen pen = ((time / 104u) & 1u) ? Pen(255, 255, 255) : Pen(255, 230, 90);
         text_shadow(INTRO_LINE, outline_font, Point(64, y), pen, TextAlign::top_center);
     }
     if((time / 500u) & 1u && t > 20) text_shadow("A: SKIP", minimal_font, Point(SW - 2, 2), Pen(200, 190, 210), TextAlign::top_right);
@@ -2291,9 +2685,9 @@ void render(uint32_t time) {
     if(state == State::INTRO) {
         float pan, dx;
         intro_camera(pan, dx);
-        run.bg_scroll += pan;
         view_dx += dx;
     }
+    run.bg_scroll = scenery_scroll();
 
 #ifdef CHILI_SELFTEST
 #define PROFILE(n) st_profile(n)
@@ -2313,6 +2707,7 @@ void render(uint32_t time) {
     PROFILE(3);
     render_particles();
     if(state == State::RUN || (attract && state == State::TITLE)) render_speed_lines(time);
+    if(state == State::RUN || state == State::CRASH) render_hype(time);
 
     if(run.flash > 0.0f) {
         Pen p = run.flash_pen;
@@ -2431,7 +2826,7 @@ void update(uint32_t time) {
                         }
                         break;
                     case 1: set_state(State::MISSIONS); break;
-                    case 2: set_state(State::STYLE); break;
+                    case 2: open_style(); set_state(State::STYLE); break;
                     case 3: set_state(State::HELP); break;
                     case 4: set_state(State::SETTINGS); menu_cursor = 0; break;
                 }
@@ -2440,24 +2835,9 @@ void update(uint32_t time) {
 
         case State::STYLE: {
             update_run(false);
-            int dv = 0;
-            if(buttons.pressed & Button::DPAD_UP) {
-                style_item = (style_item + paint::ITEMS - 1) % paint::ITEMS;
-                audio::sfx(audio::Sfx::MENU_MOVE);
-            }
-            if(buttons.pressed & Button::DPAD_DOWN) {
-                style_item = (style_item + 1) % paint::ITEMS;
-                audio::sfx(audio::Sfx::MENU_MOVE);
-            }
-            if(buttons.pressed & (Button::DPAD_RIGHT | Button::A)) dv = 1;
-            if(buttons.pressed & Button::DPAD_LEFT) dv = paint::VARIANTS - 1;
-            if(dv) {
-                style.v[style_item] = uint8_t((style.v[style_item] + dv) % paint::VARIANTS);
-                apply_style();
-                store_style();
-                audio::sfx(audio::Sfx::MENU_MOVE);
-            }
+            update_style_menu();
             if(buttons.pressed & Button::B) {
+                close_style();
                 audio::sfx(audio::Sfx::MENU_OK);
                 set_state(State::TITLE);
                 menu_cursor = 2;
@@ -2478,6 +2858,8 @@ void update(uint32_t time) {
             if(state_ticks == INTRO_ORBIT) audio::sfx(audio::Sfx::LANE);
             bool skip = state_ticks > 5 && (buttons.pressed & (Button::A | Button::B | Button::X | Button::Y));
             if(skip || state_ticks >= INTRO_TICKS) {
+                // the camera stays where it turned to, so the hills don't jump back
+                run.bg_scroll = scenery_scroll();
                 set_state(State::READY);
                 audio::sfx(audio::Sfx::COUNTDOWN);
             }

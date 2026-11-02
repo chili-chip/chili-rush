@@ -543,18 +543,39 @@ def jump_down_frame():
 
 
 # Alternates that play now and then so jumps and slides do not look the same
-# every time: a star jump, and a knee slide with the arms spread.
+# every time: a dab jump, and a knee slide with the arms spread.
 def jump_up_alt_frame():
-    # take-off with both arms punched straight up, legs together
-    return hero_back(T=4, H=17, W=8, legs=[(7, 0, False), (8, 0, False)],
-                     hands=[(3, 0, False), (11, 0, False)], tails="rise", phase=1.3,
-                     dust=[(2.0, 21.5, 1.4, "e"), (13.5, 21.5, 1.4, "w")])
+    # one-leg hop: pushes off the left foot, right knee up with the sole at us,
+    # right fist punched up high, left arm flung down behind
+    return lean(hero_back(T=5, H=15, W=9, legs=[(5, 0, False), (13, 9, True)],
+                          hands=[(0, 17, True), (15, 0, False)], tails="rise", phase=1.3, curl=-4.0,
+                          dust=[(2.0, 21.5, 1.4, "e")]), 2)
+
+
+def lean(sp, top_shift):
+    """Shear a 16x24 frame: the bottom row stays, the top row moves by
+    top_shift pixels (the whole runner leans over)."""
+    out = Spr(sp.w, sp.h)
+    for y in range(sp.h):
+        dx = int(round(top_shift * (sp.h - 1 - y) / (sp.h - 1)))
+        for x in range(sp.w):
+            v = sp.p[y][x]
+            if v is not None and 0 <= x + dx < sp.w:
+                out.p[y][x + dx] = v
+    return out
 
 
 def jump_alt_frame():
-    # apex: spread-eagle star, arms and legs wide, both soles at us
-    return hero_back(T=5, H=14, W=10, legs=[(2, 0, True), (13, 0, True)],
-                     hands=[(0, 1, False), (14, 1, False)], tails="float", phase=0.7)
+    # top of the jump: a dab. Left arm folded across the face, right arm
+    # thrown straight out and up, legs dangling together off to the side
+    return lean(hero_back(T=8, H=12, W=11, legs=[(10, 0, False), (12, 1, False)],
+                          hands=[(12, 7, True), (15, 0, False)], tails="float", phase=0.7, curl=-5.0), 4)
+
+
+def jump_down_alt_frame():
+    # falling out of the dab: arms windmilling up on the left, legs splayed
+    return hero_back(T=6, H=14, W=11, legs=[(2, 0, False), (15, 7, True)],
+                     hands=[(0, 1, True), (2, 9, True)], tails="fall", phase=1.6, curl=5.0)
 
 
 def slide_alt_frame(alt=0):
@@ -1609,6 +1630,243 @@ def car_city():
     return s
 
 
+# ================================================================ SKINS
+# A second look for every obstacle, bought in the STYLE menu with chilis.
+# Each keeps its obstacle's size, footprint and job (jump, slide under,
+# dodge), and the cars keep their lamps where the headlight glow is drawn.
+
+def fence_alt():
+    """HAY BALES: three round bales in a row, twine round each."""
+    s = Spr(32, 16)
+    hay = [(250, 226, 130), (226, 184, 80), (176, 130, 44), (120, 84, 30)]
+    for cx in (5.5, 16, 26.5):
+        s.shaded_ellipse(cx, 9.5, 5.2, 6.2, hay)
+        for y in range(4, 16):          # straw stripes
+            if y % 3 == 0:
+                s.px(int(cx) - 2, y, hay[2])
+                s.px(int(cx) + 2, y + 1, hay[2])
+        s.rect(int(cx) - 4, 7, 9, 1, (150, 60, 40))   # twine
+        s.rect(int(cx) - 4, 12, 9, 1, (150, 60, 40))
+        s.px(int(cx) - 1, 4, hay[0])
+    for gx in (1, 11, 21, 30):          # loose straw at the feet
+        s.px(gx, 15, hay[1])
+    s.outline()
+    return s
+
+
+def cart_alt():
+    """ROADWORKS: a striped plastic barrier with a blinking lamp and cones."""
+    s = Spr(32, 16)
+    orange, dark, white = (255, 120, 30), (196, 70, 20), (250, 250, 240)
+    s.rect(1, 3, 30, 6, white)
+    for x in range(1, 31):              # diagonal stripes
+        for y in range(3, 9):
+            if ((x + y) // 3) % 2 == 0:
+                s.px(x, y, orange)
+    s.rect(1, 8, 30, 1, dark)
+    for x in (4, 26):                   # legs
+        s.rect(x, 9, 2, 6, (90, 90, 100))
+        s.rect(x - 2, 14, 6, 2, (60, 60, 70))
+    s.rect(14, 0, 4, 3, (255, 210, 60))  # lamp on top
+    s.rect(15, 0, 2, 1, (255, 250, 200))
+    for cx in (11, 20):                 # two cones
+        s.poly([(cx - 3, 15.9), (cx, 9), (cx + 3, 15.9)], orange)
+        s.rect(cx - 1, 12, 3, 1, white)
+        s.rect(cx - 3, 15, 7, 1, dark)
+    s.outline()
+    return s
+
+
+def barrier_alt():
+    """BONE PILE: a heap of old bones and a horned skull, glowing eyes."""
+    s = Spr(32, 16)
+    bone, shade = (240, 232, 210), (180, 168, 150)
+    s.poly([(1, 15.9), (6, 9), (14, 7), (22, 8), (30, 11), (31, 15.9)], (90, 70, 80))
+    for (x0, y0, x1, y1) in [(2, 13, 12, 9), (8, 14, 20, 12), (18, 10, 29, 14), (3, 11, 9, 15), (22, 15, 30, 9)]:
+        s.line(x0, y0, x1, y1, bone)
+        s.line(x0, y0 + 1, x1, y1 + 1, shade)
+        s.rect(x0 - 1, y0 - 1, 2, 2, bone)
+        s.rect(x1 - 1, y1 - 1, 2, 2, bone)
+    s.ellipse(16, 6, 5, 4.5, bone)      # skull
+    s.rect(13, 8, 7, 3, bone)
+    s.rect(13, 10, 7, 1, shade)
+    s.rect(13, 5, 2, 2, (255, 120, 30))  # glowing eyes
+    s.rect(17, 5, 2, 2, (255, 120, 30))
+    s.px(16, 8, (60, 40, 50))
+    for x in (14, 16, 18):
+        s.px(x, 10, (60, 40, 50))
+    s.line(11, 3, 9, 0, shade)          # horns
+    s.line(21, 3, 23, 0, shade)
+    s.outline()
+    return s
+
+
+def weed_alt(frame):
+    """TYRE: an old tyre rolling across the road (two frames turn the tread)."""
+    s = Spr(16, 16)
+    rubber, tread, rim = (60, 56, 66), (36, 32, 42), (236, 186, 52)   # gold rim takes the paint
+    s.ellipse(7.5, 7.5, 7.2, 7.4, rubber)
+    for k in range(16):                 # tread blocks round the edge
+        a = 2 * math.pi * k / 16 + frame * math.pi / 16
+        s.px(7.5 + 6.6 * math.cos(a), 7.5 + 6.8 * math.sin(a), tread)
+    s.ellipse(7.5, 7.5, 3.6, 3.8, rim)
+    s.ellipse(7.5, 7.5, 1.6, 1.6, (176, 120, 30))
+    for k in range(4):                  # bolts
+        a = frame * math.pi / 4 + k * math.pi / 2
+        s.px(7.5 + 2.6 * math.cos(a), 7.5 + 2.6 * math.sin(a), (230, 230, 240))
+    s.px(4, 3, (120, 116, 130))
+    s.outline()
+    return s
+
+
+def banner_alt():
+    """RANCH GATE: a log beam on two posts with a cow skull hanging from it."""
+    s = Spr(32, 32)
+    wood = [(214, 150, 90), (170, 106, 60), (116, 66, 36)]
+    for x in (2, 27):
+        s.rect(x, 1, 3, 30, wood[1])
+        s.rect(x, 1, 1, 30, wood[0])
+        s.rect(x + 2, 1, 1, 30, wood[2])
+        s.rect(x - 1, 29, 5, 2, (110, 100, 90))
+    s.rect(0, 2, 32, 4, wood[1])        # beam
+    s.rect(0, 2, 32, 1, wood[0])
+    s.rect(0, 5, 32, 1, wood[2])
+    for x in (6, 13, 20):               # rings in the log
+        s.px(x, 3, wood[2])
+    s.line(15, 6, 15, 8, (90, 80, 70))  # skull on a string
+    s.line(17, 6, 17, 8, (90, 80, 70))
+    bone = (240, 232, 214)
+    s.rect(13, 8, 7, 4, bone)
+    s.rect(14, 12, 5, 2, bone)
+    s.line(12, 8, 9, 6, bone)           # horns
+    s.line(20, 8, 23, 6, bone)
+    s.px(14, 10, (60, 40, 40))
+    s.px(18, 10, (60, 40, 40))
+    s.px(16, 13, (60, 40, 40))
+    s.outline()
+    return s
+
+
+def banner_city_alt():
+    """SKY BRIDGE: a glass footbridge across the street on two steel legs."""
+    s = Spr(32, 32)
+    steel, dark = (120, 130, 160), (60, 66, 90)
+    for x in (2, 27):
+        s.rect(x, 1, 3, 30, steel)
+        s.rect(x + 2, 1, 1, 30, dark)
+        s.rect(x - 1, 29, 5, 2, (40, 44, 60))
+    s.rect(0, 1, 32, 9, dark)           # bridge body
+    s.rect(1, 2, 30, 5, (60, 200, 240))  # glass
+    for x in range(1, 31, 5):
+        s.rect(x, 2, 1, 5, steel)
+    for x in (7, 18, 23):               # people walking across
+        s.rect(x, 4, 2, 3, (255, 90, 200))
+        s.px(x, 3, (255, 210, 170))
+    s.rect(0, 7, 32, 1, (255, 80, 210))  # neon strip under it
+    s.rect(0, 9, 32, 1, steel)
+    s.outline()
+    return s
+
+
+def banner_lava_alt():
+    """RIB ARCH: the ribs of some huge old beast arching over the road."""
+    s = Spr(32, 32)
+    bone, shade = (236, 226, 204), (170, 156, 140)
+    for side in (-1, 1):
+        for k, r in enumerate((15, 12)):
+            pts = []
+            for i in range(25):
+                a = math.pi * i / 24
+                x = 16 + side * r * math.cos(a) * (1 if side > 0 else 1)
+                pts.append((16 + r * math.cos(a), 31 - (r + 15) * math.sin(a) * (1.0 if k == 0 else 0.92)))
+            for a_, b_ in zip(pts, pts[1:]):
+                s.line(a_[0], a_[1], b_[0], b_[1], bone if k == 0 else shade)
+    s.rect(1, 29, 3, 3, shade)
+    s.rect(28, 29, 3, 3, shade)
+    s.rect(11, 1, 10, 3, bone)          # spine at the top
+    for x in range(12, 21, 2):
+        s.px(x, 0, shade)
+    s.rect(14, 4, 4, 2, (255, 120, 30))  # ember glow caught in it
+    s.outline()
+    return s
+
+
+def spire_alt():
+    """CRYSTALS: a cluster of glowing obsidian-and-amethyst crystals."""
+    s = Spr(24, 40)
+    for (x0, x1, top, c) in [(2, 9, 14, (150, 80, 220)), (14, 22, 10, (120, 60, 200)), (6, 17, 0, (190, 120, 255))]:
+        mid = (x0 + x1) / 2
+        s.poly([(x0, 40), (x0, top + 6), (mid, top), (x1, top + 6), (x1, 40)], c)
+        s.line(mid, top + 1, mid, 39, (230, 200, 255))          # bright edge
+        s.line(x0 + 1, top + 7, x0 + 1, 39, (90, 40, 150))     # dark side
+    for (x, y) in [(11, 6), (5, 20), (18, 16), (12, 28), (8, 34), (17, 30)]:
+        s.px(x, y, (255, 255, 255))
+    for x in range(1, 23):
+        s.px(x, 39, (255, 120, 30) if x % 3 else (255, 210, 80))
+    s.outline()
+    return s
+
+
+def car_desert_alt():
+    """CAMPER: a round-nosed old camper van, two-tone, seen from the front."""
+    s = Spr(32, 28)
+    top, body, dark = (250, 246, 236), (80, 170, 170), (40, 110, 116)
+    L = LAMP["desert"]
+    s.rect(4, 1, 24, 11, top)           # tall roof and windscreen
+    s.rect(5, 0, 22, 1, top)
+    s.rect(6, 3, 9, 7, "N")
+    s.rect(17, 3, 9, 7, "N")
+    s.line(7, 4, 9, 8, "C")
+    s.line(18, 4, 19, 6, "C")
+    s.poly([(2, 12), (30, 12), (31, 22), (1, 22)], body)
+    s.rect(2, 12, 28, 1, (130, 210, 206))
+    s.poly([(10, 13), (22, 13), (16, 19)], top)  # V on the nose
+    s.ellipse(16, 15.5, 2.2, 2.2, (200, 200, 210))  # round badge
+    for cx in (5, 26):
+        s.ellipse(cx, 19.5, 2.6, 2.6, "e")
+        s.ellipse(cx, 19.5, 1.8, 1.8, L[1])
+        s.px(cx - 1, 19, L[0])
+        s.px(cx, 19, L[0])
+        s.px(cx - 1, 18, L[0])
+    s.rect(0, 22, 32, 2, "e")
+    s.rect(0, 23, 32, 1, "x")
+    s.rect(14, 22, 4, 2, "Y")
+    for x0 in (2, 24):
+        s.rect(x0, 24, 6, 4, "4")
+        s.rect(x0, 24, 6, 1, "3")
+    s.rect(1, 21, 30, 1, dark)
+    s.outline()
+    return s
+
+
+def car_city_alt():
+    """TAXI: a yellow cab with a roof sign and a chequered stripe."""
+    s = Spr(32, 28)
+    paint = [(255, 230, 90), (246, 196, 30), (196, 140, 10), (120, 84, 10)]
+    L = LAMP["city"]
+    s.rect(12, 2, 8, 3, (250, 250, 240))  # roof sign
+    s.rect(13, 3, 6, 1, (40, 40, 40))
+    s.poly([(8, 5), (24, 5), (27, 12), (5, 12)], paint[1])
+    s.poly([(9, 6), (23, 6), (25, 11), (7, 11)], "M")
+    s.line(10, 7, 12, 10, "c")
+    s.poly([(2, 12), (30, 12), (31, 21), (1, 21)], paint[1])
+    s.rect(3, 12, 26, 1, paint[0])
+    for x in range(2, 30):              # chequered stripe
+        s.px(x, 15, (30, 30, 30) if (x // 2) % 2 else (250, 250, 240))
+        s.px(x, 16, (250, 250, 240) if (x // 2) % 2 else (30, 30, 30))
+    for x0, x1 in ((2, 9), (22, 29)):
+        s.rect(x0, 17, x1 - x0 + 1, 2, L[1])
+        s.rect(x0 + 1, 17, x1 - x0 - 1, 1, L[0])
+    s.rect(10, 18, 12, 3, "4")
+    s.rect(1, 20, 30, 1, paint[3])
+    s.rect(0, 21, 32, 1, "z")
+    for x0 in (2, 25):
+        s.rect(x0, 22, 5, 5, "4")
+        s.rect(x0, 22, 5, 1, "3")
+    s.outline()
+    return s
+
+
 # ================================================================ INTRO
 # The hero for the start-of-run camera move, drawn at twice the detail
 # (32x48) because the camera starts in a close-up: facing us, three
@@ -1849,7 +2107,9 @@ def apply_paint(sprites):
     """Make each paintable obstacle's chromatic colours unique to it.
     Returns [(name, [original colours], [[variant colours] x 3])]."""
     lamps = {c for v in LAMP.values() for c in v}
-    paint_names = {n for _, n, _ in PAINT_ITEMS}
+    # an obstacle's bought look (name_alt) shares its colours, so one colour
+    # choice paints both looks
+    paint_names = {n for _, n, _ in PAINT_ITEMS} | {n + "_alt" for _, n, _ in PAINT_ITEMS}
     used = set()
     for name, v in sprites.items():
         if name in paint_names:
@@ -1860,7 +2120,7 @@ def apply_paint(sprites):
     used |= lamps
     table = []
     for menu, name, variants in PAINT_ITEMS:
-        arts = arts_of(sprites[name])
+        arts = arts_of(sprites[name]) + arts_of(sprites.get(name + "_alt", []))
         colours = sorted({c for a in arts for row in a.p for c in row
                           if c is not None and c not in lamps and chromatic(c)})
         remap = {}
@@ -1936,11 +2196,13 @@ def parse_rects(path):
 
 
 BOTTOM_ANCHORED = {"run", "jump", "jump_up", "jump_down", "land", "slide2", "slide", "dash", "hurt",
-                   "jump_up_alt", "jump_alt", "slide_alt", "fence", "banner",
+                   "jump_up_alt", "jump_alt", "jump_down_alt", "slide_alt", "fence", "banner",
                    "cactus", "weed", "cart", "barrier", "vending", "spire",
                    "banner_city", "banner_lava", "agave", "rock", "skull",
                    "sign", "lamp", "tower", "pillar", "vent", "car_desert", "car_city",
-                   "intro_front", "intro_q1", "intro_side", "intro_q3"}
+                   "intro_front", "intro_q1", "intro_side", "intro_q3",
+                   "fence_alt", "cart_alt", "barrier_alt", "weed_alt", "banner_alt", "banner_city_alt",
+                   "banner_lava_alt", "spire_alt", "car_desert_alt", "car_city_alt"}
 
 
 # the body is centred; the bandana tails stream out behind it
@@ -1958,6 +2220,7 @@ def build_sprites():
         "slide2": slide_frame(1),
         "jump_up_alt": jump_up_alt_frame(),
         "jump_alt": jump_alt_frame(),
+        "jump_down_alt": jump_down_alt_frame(),
         "slide_alt": [slide_alt_frame(0), slide_alt_frame(1)],
         "dash": dash_frames(),
         "hurt": hurt_frame(),
@@ -1998,6 +2261,16 @@ def build_sprites():
         "shades_front": shades_big("front"),
         "shades_q1": shades_big("q1"),
         "shades_side": shades_big("side"),
+        "fence_alt": fence_alt(),
+        "cart_alt": cart_alt(),
+        "barrier_alt": barrier_alt(),
+        "weed_alt": [weed_alt(0), weed_alt(1)],
+        "banner_alt": banner_alt(),
+        "banner_city_alt": banner_city_alt(),
+        "banner_lava_alt": banner_lava_alt(),
+        "spire_alt": spire_alt(),
+        "car_desert_alt": car_desert_alt(),
+        "car_city_alt": car_city_alt(),
     }
 
 
@@ -2022,6 +2295,10 @@ def make_sheet():
     if missing:
         print("warning: art without a rect:", sorted(missing))
     verify(sheet, placed)
+    colours = {c for _, c in sheet.getcolors(1 << 16) if c[3]}
+    if len(colours) > 255:
+        sys.exit("sheet has %d colours: a paletted sheet holds 255 and transparent" % len(colours))
+    print("sheet colours: %d of 255" % len(colours))
     return sheet
 
 
