@@ -25,13 +25,19 @@ namespace {
 constexpr int SW = 128;
 constexpr int SH = 128;
 constexpr int HORIZON = 46;         // screen row of the horizon
-constexpr float FOCAL = 100.0f;     // projection: row offset = FOCAL / z
+// Projection: row offset = FOCAL / z. A long lens (large FOCAL) keeps far
+// obstacles big enough to tell apart; the player's lane width does not change.
+constexpr float FOCAL = 200.0f;
+// bends were tuned at FOCAL 100: keep their shape on screen
+constexpr float CURVE_K = (100.0f / FOCAL) * (100.0f / FOCAL);
 constexpr float LANE_W = 0.45f;     // world width of a lane
 constexpr float ROAD_HALF = 0.72f;  // half the asphalt width
 constexpr float RUMBLE = 0.07f;     // kerb width
 constexpr int PLAYER_FEET_Y = 120;  // screen row of the player's feet
 constexpr float Z_PLAYER = FOCAL / float(PLAYER_FEET_Y - HORIZON);
 constexpr float Z_FAR = 34.0f;      // objects appear here
+constexpr float FADE_IN = 4.0f;     // and fade in over this depth
+constexpr float Z_NEAR = Z_PLAYER * 0.3f;  // passed objects vanish here (at about 3x size)
 constexpr float SEGMENT = 0.5f;     // stripe length on the road
 constexpr float HIT_DEPTH = 0.22f;  // player hitbox along the road, either side of the feet
 constexpr float DT = 0.01f;         // seconds per update()
@@ -849,7 +855,7 @@ struct Screen {
 // World point (lateral x, height h, depth z ahead of the camera) to screen.
 Screen project(float x, float h, float z) {
     float k = FOCAL / z;
-    float sx = 64.0f + view_dx + (x - run.cam_x + run.curve * z * z) * k;
+    float sx = 64.0f + view_dx + (x - run.cam_x + run.curve * CURVE_K * z * z) * k;
     float sy = float(HORIZON) + view_dy + (1.0f - h) * k;
     return {sx, sy, Z_PLAYER / z};
 }
@@ -1410,7 +1416,7 @@ void render_road() {
     for(int y = HORIZON + 1; y < SH; y++) {
         float k = float(y - HORIZON);
         float z = rows.z[y];
-        float cx = 64.0f + view_dx + (run.curve * z * z - run.cam_x) * k;
+        float cx = 64.0f + view_dx + (run.curve * CURVE_K * z * z - run.cam_x) * k;
         float s = z + run.distance - Z_PLAYER;
         int alt = (int(floorf(s / SEGMENT)) & 1) != 0;
 
@@ -1498,7 +1504,7 @@ void render_objects(uint32_t time, bool before_player) {
     for(auto &o : objs) {
         if(o.kind == K_NONE || o.collected) continue;
         float z = depth_of(o);
-        if(z > Z_FAR + 1.0f || z < 0.35f) continue;
+        if(z > Z_FAR + 1.0f || z < Z_NEAR) continue;
         bool behind = (o.s - run.distance) < -0.05f;
         if(behind == before_player) continue;
         items[n++] = {z, &o};
@@ -1517,6 +1523,8 @@ void render_objects(uint32_t time, bool before_player) {
         }
         Screen p = project(o.x + xo, h, z);
         if(p.x < -40.0f || p.x > float(SW + 40)) continue;
+        // fade in at the far end instead of popping up
+        screen.alpha = uint8_t(255.0f * clampf((Z_FAR + 1.0f - z) / FADE_IN, 0.0f, 1.0f));
 
         if(o.kind == K_DECOR) {
             draw_scaled(decor_rect(o.biome, o.art), p.x, p.y, p.scale);
@@ -1535,6 +1543,7 @@ void render_objects(uint32_t time, bool before_player) {
             draw_scaled(sp, p.x + 6.0f * p.scale, p.y - 10.0f * p.scale, p.scale);
         }
     }
+    screen.alpha = 255;
 }
 
 void render_player(uint32_t time) {

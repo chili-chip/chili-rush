@@ -63,9 +63,9 @@ cmake --build build-test --target chili-rush-selftest
 
 - **Fairness.** A bot that plans its moves (lane changes, jumps, slides, the jump buffer, fire dash) plays many seeds, from the first metre to top speed. Alongside, the test tracks every state a player could be in by now with any inputs (one every 0.05 s) and reports any obstacles that no inputs at all could survive, rechecked with an input every 10 ms. It must catch a hand-made wall of three blocks and pass the tightest fair rows.
 - **Every update:** the object pool never fills, no chili inside an obstacle, no power-up inside a row, no NaN, score, combo, multiplier and heat stay sane, popups stay clear of the HUD, and the bot's model of the runner matches the game exactly.
-- **Flows:** the countdown, pause and resume, every way out of a run (crash, restart, quit, the console quitting the game) counting the run once with its chilis, best and missions, the results screen ignoring a held or mashed A, the title demo never touching the save, damaged saves, catching up after a long stall, distances 200 km into a run, and text that must fit 128 px.
+- **Flows:** the countdown, pause and resume, every way out of a run (crash, restart, quit, the console quitting the game) counting the run once with its chilis, best and missions, the results screen ignoring a held or mashed A, obstacles readable from far enough at top speed, the title demo never touching the save, damaged saves, catching up after a long stall, distances 200 km into a run, and text that must fit 128 px.
 
-It prints a summary and exits 1 on any failure (`-v` shows details, `--jobs N` sets the processes). `--frames DIR` renders fixed scenes (every biome, dash, magnet, shield, crash, results, pause) to images, and `--bench` times the renderer.
+It prints a summary and exits 1 on any failure (`-v` shows details, `--jobs N` sets the processes). `--frames DIR` renders fixed scenes (every biome, dash, magnet, shield, crash, results, pause) to images, `--clip DIR [--clip-from M]` renders 5 seconds of a run frame by frame (to compare changes to the look in motion), and `--bench` times the renderer.
 
 CI builds Linux, macOS, Windows, the web version, and the VGC `.uf2` and `.blit` on every push, and the Linux job runs the self-test. Publishing a GitHub release attaches all builds; a push to `main` deploys the web version to GitHub Pages.
 
@@ -79,7 +79,7 @@ CI builds Linux, macOS, Windows, the web version, and the VGC `.uf2` and `.blit`
 | `selftest.hpp`, `selftest_main.cpp` | The self-test (`-DCHILI_SELFTEST=ON`) and its headless stand-in for the console |
 | `tools/make_sprites.py` | Draws `assets/sprites.png`, `assets/splash.png` and `assets/icon.png` |
 
-The road is drawn one screen row at a time: a row `y` below the horizon shows the road at depth `z = FOCAL / (y - HORIZON)`. Bends shift each row sideways by `curve * z²`, and sprites are scaled by their depth. It needs no 3D engine, which keeps it fast on the RP2350.
+The road is drawn one screen row at a time: a row `y` below the horizon shows the road at depth `z = FOCAL / (y - HORIZON)`. Bends shift each row sideways by `curve * z²`, and sprites are scaled by their depth. `FOCAL` works like the camera's lens: a long lens (200) keeps obstacles far down the road big enough to tell apart, and the self-test checks that a fence 0.45 s away at top speed is at least 7 px wide. Objects fade in at the far end instead of popping up. It needs no 3D engine, which keeps it fast on the RP2350.
 
 ## Licence
 

@@ -1059,6 +1059,19 @@ void flow_fast_fall() {
 }
 
 // Strings must fit their place on the 128 px screen.
+// Obstacles must read from far enough to react: at top speed, an obstacle
+// 0.45 s away is drawn at least 7 px wide (lanes are 32 px wide at the player).
+void flow_readability() {
+    fresh_save();
+    to_running();
+    const float react = 0.45f;
+    float z = Z_PLAYER + SPEED_MAX * react;
+    Screen p = project(0.0f, 0.0f, z);
+    float w = float(spr::fence.w) * p.scale, h = float(spr::fence.h) * p.scale;
+    expect(w >= 7.0f && h >= 3.5f, "flow: readability",
+           "a fence %.2f s away at top speed is %.1f x %.1f px (want 7 x 3.5)", double(react), double(w), double(h));
+}
+
 void flow_text_fit() {
     auto w = [](const char *s) { return screen.measure_text(s, minimal_font).w; };
     char a[40], b[40];
@@ -1234,6 +1247,21 @@ void render_scenes(const char *dir, bool bench) {
     }
 }
 
+// --clip DIR: a run from `d` metres, one image per drawn frame (every 20 ms),
+// to compare how the road reads in motion. The runner cannot crash here.
+void render_clip(const char *dir, float d, int frames) {
+    scene_run_at(d, 1);
+    for(int i = 0; i < frames; i++) {
+        st_ghost = true;
+        steps(2);
+        ::render(clock_ms);
+        char path[512];
+        snprintf(path, sizeof(path), "%s/clip%04d.ppm", dir, i);
+        write_ppm(path);
+    }
+    st_ghost = false;
+}
+
 void flows() {
     flow_resume();
     flow_precision();
@@ -1248,6 +1276,7 @@ void flows() {
     flow_popups();
     flow_fast_fall();
     flow_text_fit();
+    flow_readability();
     st_ghost = false;
     fresh_save();
 }
@@ -1320,7 +1349,8 @@ void read_results(FILE *f) {
 
 int chili_selftest(int argc, char **argv) {
     int seeds = 24, jobs = 1;
-    const char *frames_dir = nullptr;
+    const char *frames_dir = nullptr, *clip_dir = nullptr;
+    float clip_from = 600.0f;
     bool bench = false, flows_only = false;
 #ifdef __unix__
     jobs = std::max(1, std::min(16, int(sysconf(_SC_NPROCESSORS_ONLN))));
@@ -1332,9 +1362,11 @@ int chili_selftest(int argc, char **argv) {
         else if(!strcmp(argv[i], "--quick")) seeds = 4;
         else if(!strcmp(argv[i], "--frames") && i + 1 < argc) frames_dir = argv[++i];
         else if(!strcmp(argv[i], "--bench")) bench = true;
+        else if(!strcmp(argv[i], "--clip") && i + 1 < argc) clip_dir = argv[++i];
+        else if(!strcmp(argv[i], "--clip-from") && i + 1 < argc) clip_from = float(atof(argv[++i]));
         else if(!strcmp(argv[i], "--flows")) flows_only = true;
         else {
-            printf("usage: chili-rush-selftest [--seeds N] [--quick] [--jobs N] [-v] [--flows] [--frames DIR] [--bench]\n");
+            printf("usage: chili-rush-selftest [--seeds N] [--quick] [--jobs N] [-v] [--flows] [--frames DIR] [--bench] [--clip DIR [--clip-from M]]\n");
             return 2;
         }
     }
@@ -1342,6 +1374,10 @@ int chili_selftest(int argc, char **argv) {
     auto t0 = std::chrono::steady_clock::now();
     ::init();
     save.seen_help = 1;
+    if(clip_dir) {
+        st::render_clip(clip_dir, clip_from, 250);
+        return 0;
+    }
     if(frames_dir || bench) {
         st::render_scenes(frames_dir, bench);
         return 0;
