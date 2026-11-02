@@ -18,10 +18,11 @@ const Rect slide    = Rect(80, 0, 16, 24);   // crouched, only the bottom ~12 ro
 const Rect slide2   = Rect(112, 176, 16, 24); // second slide frame (dust/cloth flutter), alternates with slide
 const Rect dash[2]  = {Rect(96, 0, 16, 24), Rect(112, 0, 16, 24)}; // fire dash, flames
 const Rect hurt     = Rect(0, 24, 16, 24);
-// Alternates now and then: a star jump (take-off, apex; the fall reuses
-// jump_down) and a knee slide (two frames).
+// Alternates now and then: a dab jump (one-leg hop with a fist up, a leaning
+// dab at the top, arms windmilling on the way down) and a knee slide.
 const Rect jump_up_alt = Rect(0, 292, 16, 24);
 const Rect jump_alt    = Rect(16, 292, 16, 24);
+const Rect jump_down_alt = Rect(64, 292, 16, 24);
 const Rect slide_alt[2] = {Rect(32, 292, 16, 24), Rect(48, 292, 16, 24)};
 
 // Obstacles, drawn at their nearest (largest) size, bottom-centre anchored.

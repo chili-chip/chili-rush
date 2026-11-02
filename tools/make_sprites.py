@@ -543,18 +543,39 @@ def jump_down_frame():
 
 
 # Alternates that play now and then so jumps and slides do not look the same
-# every time: a star jump, and a knee slide with the arms spread.
+# every time: a dab jump, and a knee slide with the arms spread.
 def jump_up_alt_frame():
-    # take-off with both arms punched straight up, legs together
-    return hero_back(T=4, H=17, W=8, legs=[(7, 0, False), (8, 0, False)],
-                     hands=[(3, 0, False), (11, 0, False)], tails="rise", phase=1.3,
-                     dust=[(2.0, 21.5, 1.4, "e"), (13.5, 21.5, 1.4, "w")])
+    # one-leg hop: pushes off the left foot, right knee up with the sole at us,
+    # right fist punched up high, left arm flung down behind
+    return lean(hero_back(T=5, H=15, W=9, legs=[(5, 0, False), (13, 9, True)],
+                          hands=[(0, 17, True), (15, 0, False)], tails="rise", phase=1.3, curl=-4.0,
+                          dust=[(2.0, 21.5, 1.4, "e")]), 2)
+
+
+def lean(sp, top_shift):
+    """Shear a 16x24 frame: the bottom row stays, the top row moves by
+    top_shift pixels (the whole runner leans over)."""
+    out = Spr(sp.w, sp.h)
+    for y in range(sp.h):
+        dx = int(round(top_shift * (sp.h - 1 - y) / (sp.h - 1)))
+        for x in range(sp.w):
+            v = sp.p[y][x]
+            if v is not None and 0 <= x + dx < sp.w:
+                out.p[y][x + dx] = v
+    return out
 
 
 def jump_alt_frame():
-    # apex: spread-eagle star, arms and legs wide, both soles at us
-    return hero_back(T=5, H=14, W=10, legs=[(2, 0, True), (13, 0, True)],
-                     hands=[(0, 1, False), (14, 1, False)], tails="float", phase=0.7)
+    # top of the jump: a dab. Left arm folded across the face, right arm
+    # thrown straight out and up, legs dangling together off to the side
+    return lean(hero_back(T=8, H=12, W=11, legs=[(10, 0, False), (12, 1, False)],
+                          hands=[(12, 7, True), (15, 0, False)], tails="float", phase=0.7, curl=-5.0), 4)
+
+
+def jump_down_alt_frame():
+    # falling out of the dab: arms windmilling up on the left, legs splayed
+    return hero_back(T=6, H=14, W=11, legs=[(2, 0, False), (15, 7, True)],
+                     hands=[(0, 1, True), (2, 9, True)], tails="fall", phase=1.6, curl=5.0)
 
 
 def slide_alt_frame(alt=0):
@@ -1936,7 +1957,7 @@ def parse_rects(path):
 
 
 BOTTOM_ANCHORED = {"run", "jump", "jump_up", "jump_down", "land", "slide2", "slide", "dash", "hurt",
-                   "jump_up_alt", "jump_alt", "slide_alt", "fence", "banner",
+                   "jump_up_alt", "jump_alt", "jump_down_alt", "slide_alt", "fence", "banner",
                    "cactus", "weed", "cart", "barrier", "vending", "spire",
                    "banner_city", "banner_lava", "agave", "rock", "skull",
                    "sign", "lamp", "tower", "pillar", "vent", "car_desert", "car_city",
@@ -1958,6 +1979,7 @@ def build_sprites():
         "slide2": slide_frame(1),
         "jump_up_alt": jump_up_alt_frame(),
         "jump_alt": jump_alt_frame(),
+        "jump_down_alt": jump_down_alt_frame(),
         "slide_alt": [slide_alt_frame(0), slide_alt_frame(1)],
         "dash": dash_frames(),
         "hurt": hurt_frame(),

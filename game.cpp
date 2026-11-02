@@ -1785,7 +1785,7 @@ const Rect *player_frame(uint32_t time) {
     if(dashing()) return &spr::dash[(time / 80u) & 1u];
     if(in_air()) {
         float t = run.p.jump_t / JUMP_TIME;
-        if(run.jump_alt) return t < 0.22f ? &spr::jump_up_alt : (t < 0.62f ? &spr::jump_alt : &spr::jump_down);
+        if(run.jump_alt) return t < 0.22f ? &spr::jump_up_alt : (t < 0.62f ? &spr::jump_alt : &spr::jump_down_alt);
         return t < 0.22f ? &spr::jump_up : (t < 0.62f ? &spr::jump : &spr::jump_down);
     }
     if(sliding()) {

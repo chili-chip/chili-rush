@@ -1140,6 +1140,36 @@ void flow_cars() {
     }
 }
 
+// How different two poses are: the share of the pixels covered by either
+// silhouette that only one of them covers (0 = same outline, 1 = no overlap).
+// Colours are left out on purpose: a retouched pose shifted by a pixel
+// changes most colours but hardly the outline.
+float frame_difference(const Rect &a, const Rect &b) {
+    Surface *sh = screen.sprites;
+    int either = 0, one = 0;
+    for(int y = 0; y < a.h; y++) {
+        for(int x = 0; x < a.w; x++) {
+            bool oa = sh->palette[sh->data[(a.y + y) * sh->bounds.w + a.x + x]].a > 0;
+            bool ob = sh->palette[sh->data[(b.y + y) * sh->bounds.w + b.x + x]].a > 0;
+            either += oa || ob;
+            one += oa != ob;
+        }
+    }
+    return either ? float(one) / float(either) : 0.0f;
+}
+
+// The alternate jump is a different move, not a retouch of the normal one:
+// every phase of it (take-off, top, fall) has an outline that differs from
+// the normal one by at least 45% (the first star jump: 25% and 34%).
+void flow_alt_jump_looks_different() {
+    float up = frame_difference(spr::jump_up_alt, spr::jump_up);
+    float top = frame_difference(spr::jump_alt, spr::jump);
+    float down = frame_difference(spr::jump_down_alt, spr::jump_down);
+    expect(up >= 0.45f && top >= 0.45f && down >= 0.45f, "flow: alternate jump",
+           "differs from the normal jump by %.0f%% at take-off, %.0f%% at the top, %.0f%% falling (want 45%% each)",
+           double(up * 100.0f), double(top * 100.0f), double(down * 100.0f));
+}
+
 // The tumbleweed hits only where it is drawn: a 16 px ball against the
 // runner's body, not half a lane either side of its centre.
 void flow_weed_hitbox() {
@@ -1373,7 +1403,7 @@ void flow_dust_at_feet() {
     fresh_save();
 }
 
-// Jumps and slides sometimes use their alternate animation (star jump,
+// Jumps and slides sometimes use their alternate animation (dab jump,
 // knee slide), never always and never never.
 void flow_alt_moves() {
     fresh_save();
@@ -1388,7 +1418,7 @@ void flow_alt_moves() {
             st_ghost = true;
             const Rect *r = player_frame(clock_ms);
             if(jump) {
-                alt |= r == &spr::jump_up_alt || r == &spr::jump_alt;
+                alt |= r == &spr::jump_up_alt || r == &spr::jump_alt || r == &spr::jump_down_alt;
                 normal |= r == &spr::jump_up || r == &spr::jump;
             } else {
                 alt |= r == &spr::slide_alt[0] || r == &spr::slide_alt[1];
@@ -1402,7 +1432,7 @@ void flow_alt_moves() {
     }
     expect(jumps > 30 && slides > 30 && jump_alts * 6 > jumps && jump_alts * 2 < jumps && slide_alts * 6 > slides &&
                slide_alts * 2 < slides,
-           "flow: alternate moves", "star jumps %d of %d, knee slides %d of %d", jump_alts, jumps, slide_alts, slides);
+           "flow: alternate moves", "dab jumps %d of %d, knee slides %d of %d", jump_alts, jumps, slide_alts, slides);
     st_ghost = false;
     fresh_save();
 }
@@ -1655,6 +1685,7 @@ void flows() {
     flow_intro();
     flow_dust_at_feet();
     flow_alt_moves();
+    flow_alt_jump_looks_different();
     flow_weed_hitbox();
     flow_weed_settle();
     st_ghost = false;
