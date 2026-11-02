@@ -341,16 +341,102 @@ void reset_style() {
 
 void store_style() { write_save(style, 1); }
 
+// The chili shop: chilis from every run go into a wallet; colours past the
+// first and a second look for each obstacle are bought with them. Own save
+// slot (2), so older saves keep working; it starts from the lifetime chilis.
+constexpr uint32_t SHOP_MAGIC = 0x504f4853; // "SHOP"
+constexpr uint32_t SKIN_PRICE = 2500;
+constexpr uint16_t ALL_SKINS = uint16_t((1u << paint::ITEMS) - 1u);
+struct ShopData {
+    uint32_t magic;
+    uint32_t wallet;
+    uint8_t colours[paint::ITEMS];  // bit v: colour v owned (bit 0 always)
+    uint16_t skins_owned;           // bit i: item i's new look bought
+    uint16_t skins_on;              // bit i: item i wears it
+    uint8_t pad[2];
+};
+ShopData shop;
+
+uint32_t colour_price(int v) {
+    static const uint32_t price[paint::VARIANTS] = {0, 200, 400, 800};
+    return v >= 0 && v < paint::VARIANTS ? price[v] : 0;
+}
+bool colour_owned(int item, int v) { return v == 0 || (shop.colours[item] >> v) & 1u; }
+bool skin_owned(int item) { return (shop.skins_owned >> item) & 1u; }
+bool skin_on(int item) { return (shop.skins_on >> item) & 1u; }
+
+const char *skin_name(int item) {
+    static const char *names[paint::ITEMS] = {"HAY BALES", "ROADWORKS",  "BONE PILE", "RANCH GATE", "SKY BRIDGE",
+                                              "RIB ARCH",  "CAMPER VAN", "TAXI",      "CRYSTALS",   "OLD TYRE"};
+    return item >= 0 && item < paint::ITEMS ? names[item] : "";
+}
+
+void store_shop() { write_save(shop, 2); }
+
+bool spend(uint32_t price) {
+    if(shop.wallet < price) return false;
+    shop.wallet -= price;
+    return true;
+}
+
+bool buy_colour(int item, int v) {
+    if(colour_owned(item, v) || !spend(colour_price(v))) return false;
+    shop.colours[item] |= uint8_t(1u << v);
+    store_shop();
+    return true;
+}
+
+// a bought look goes on straight away
+bool buy_skin(int item) {
+    if(skin_owned(item) || !spend(SKIN_PRICE)) return false;
+    shop.skins_owned |= uint16_t(1u << item);
+    shop.skins_on |= uint16_t(1u << item);
+    store_shop();
+    return true;
+}
+
+void reset_shop() {
+    memset(&shop, 0, sizeof(shop));
+    shop.magic = SHOP_MAGIC;
+    for(auto &c : shop.colours) c = 1;
+}
+
+// No shop yet (a save from before it): the wallet starts at every chili ever
+// collected, and the colours already picked in STYLE are owned.
+void migrate_shop() {
+    reset_shop();
+    shop.wallet = save.total_chilis;
+    for(int i = 0; i < paint::ITEMS; i++) shop.colours[i] |= uint8_t(1u << (style.v[i] & 3u));
+    store_shop();
+}
+
+void repair_shop() {
+    for(auto &c : shop.colours) c = uint8_t((c & 0x0f) | 1);
+    shop.skins_owned &= ALL_SKINS;
+    shop.skins_on &= shop.skins_owned;
+    for(int i = 0; i < paint::ITEMS; i++)
+        if(!colour_owned(i, style.v[i])) style.v[i] = 0;
+}
+
+void earn(uint32_t chilis) {
+    shop.wallet = shop.wallet > UINT32_MAX - chilis ? UINT32_MAX : shop.wallet + chilis;
+}
+
 void load_game() {
     if(!read_save(save) || save.magic != SAVE_MAGIC || save.version != SAVE_VERSION) reset_save();
     repair_save();
     if(!read_save(style, 1) || style.magic != STYLE_MAGIC) reset_style();
     for(auto &v : style.v)
         if(v >= paint::VARIANTS) v = 0;
+    if(!read_save(shop, 2) || shop.magic != SHOP_MAGIC) migrate_shop();
+    repair_shop();
     apply_style();
 }
 
-void store_game() { write_save(save); }
+void store_game() {
+    write_save(save);
+    store_shop();  // the wallet moves with the run totals
+}
 
 // Rank: one star per three missions, each star adds +1 to the base multiplier.
 int rank() { return int(std::min<uint32_t>(save.missions_done / 3, 20)); }
@@ -463,7 +549,7 @@ struct Hype {
     char text[16];
 };
 Hype hype;
-bool hype_active(HypeKind k) { return hype.kind == k && hype.t > 0.0f; }
+[[maybe_unused]] bool hype_active(HypeKind k) { return hype.kind == k && hype.t > 0.0f; }
 
 void burst(float x, float y, int n, Pen pen, float speed = 40.0f, uint8_t size = 1) {
     for(int i = 0; i < n; i++) {
@@ -999,6 +1085,7 @@ void record_run() {
     run.recorded = true;
     save.runs++;
     save.total_chilis += run.chilis;
+    earn(run.chilis);
     save.best_distance = std::max(save.best_distance, run_metres());
     save.best = std::max(save.best, run.score);
 }
@@ -1667,12 +1754,31 @@ void render_road() {
 // ---------------------------------------------------------------------------
 // Rendering: sprites
 
-const Rect &obstacle_rect(Kind k, int biome, uint32_t time) {
+// The STYLE item of an obstacle, -1 for the rest: the low, high and block
+// obstacle of each biome, then the tumbleweed (paint.hpp has the same order).
+int paint_item(Kind k, int biome) {
     switch(k) {
-        case K_LOW:   return biome == 1 ? spr::cart : biome == 2 ? spr::barrier : spr::fence;
-        case K_HIGH:  return biome == 1 ? spr::banner_city : biome == 2 ? spr::banner_lava : spr::banner;
-        case K_BLOCK: return biome == 1 ? spr::car_city : biome == 2 ? spr::spire : spr::car_desert;
-        case K_WEED:  return spr::weed[(time / 90u) & 1u];
+        case K_LOW: return biome;
+        case K_HIGH: return 3 + biome;
+        case K_BLOCK: return 6 + biome;
+        case K_WEED: return 9;
+        default: return -1;
+    }
+}
+
+// The obstacle's art in its classic look or its bought one.
+const Rect &obstacle_look(Kind k, int biome, uint32_t time, bool alt) {
+    switch(k) {
+        case K_LOW:
+            if(alt) return biome == 1 ? spr::cart_alt : biome == 2 ? spr::barrier_alt : spr::fence_alt;
+            return biome == 1 ? spr::cart : biome == 2 ? spr::barrier : spr::fence;
+        case K_HIGH:
+            if(alt) return biome == 1 ? spr::banner_city_alt : biome == 2 ? spr::banner_lava_alt : spr::banner_alt;
+            return biome == 1 ? spr::banner_city : biome == 2 ? spr::banner_lava : spr::banner;
+        case K_BLOCK:
+            if(alt) return biome == 1 ? spr::car_city_alt : biome == 2 ? spr::spire_alt : spr::car_desert_alt;
+            return biome == 1 ? spr::car_city : biome == 2 ? spr::spire : spr::car_desert;
+        case K_WEED: return alt ? spr::weed_alt[(time / 90u) & 1u] : spr::weed[(time / 90u) & 1u];
         case K_CHILI: return spr::chili[(time / 200u) & 1u];
         case K_GOLDEN: return spr::golden;
         case K_MILK: return spr::milk;
@@ -1680,6 +1786,11 @@ const Rect &obstacle_rect(Kind k, int biome, uint32_t time) {
         default: break;
     }
     return spr::rock;
+}
+
+const Rect &obstacle_rect(Kind k, int biome, uint32_t time) {
+    int item = paint_item(k, biome);
+    return obstacle_look(k, biome, time, item >= 0 && skin_on(item));
 }
 
 const Rect &decor_rect(int biome, int art) {
@@ -2214,19 +2325,100 @@ void render_settings(uint32_t time) {
 }
 
 // ---------------------------------------------------------------------------
-// STYLE menu: four colours for every obstacle
+// STYLE menu: four colours and two looks for every obstacle, bought with chilis
 
 int style_item = 0;
+uint16_t look_shown = 0;               // items showing their new look in the menu
+uint8_t style_kept[paint::ITEMS];      // last owned colour of each item
+
+void open_style() {
+    look_shown = shop.skins_on;
+    memcpy(style_kept, style.v, sizeof(style_kept));
+}
+
+bool shows_look(int item) { return (look_shown >> item) & 1u; }
+
+// What A would buy for the item shown: its look, else its colour (0 = nothing).
+uint32_t style_price(int item) {
+    if(shows_look(item) && !skin_owned(item)) return SKIN_PRICE;
+    if(!colour_owned(item, style.v[item])) return colour_price(style.v[item]);
+    return 0;
+}
 
 const Rect &style_rect(int item, uint32_t time) {
     static const Kind kinds[3] = {K_LOW, K_HIGH, K_BLOCK};
-    if(item == 9) return obstacle_rect(K_WEED, 0, time);
-    return obstacle_rect(kinds[item / 3], item % 3, time);
+    if(item == 9) return obstacle_look(K_WEED, 0, time, shows_look(item));
+    return obstacle_look(kinds[item / 3], item % 3, time, shows_look(item));
+}
+
+// Leaving the menu: colours not bought go back to the last owned one.
+void close_style() {
+    for(int i = 0; i < paint::ITEMS; i++)
+        if(!colour_owned(i, style.v[i])) style.v[i] = style_kept[i];
+    apply_style();
+    store_style();
+}
+
+void update_style_menu() {
+    const int item = style_item;
+    if(buttons.pressed & Button::DPAD_UP) {
+        style_item = (style_item + paint::ITEMS - 1) % paint::ITEMS;
+        audio::sfx(audio::Sfx::MENU_MOVE);
+    }
+    if(buttons.pressed & Button::DPAD_DOWN) {
+        style_item = (style_item + 1) % paint::ITEMS;
+        audio::sfx(audio::Sfx::MENU_MOVE);
+    }
+    int dv = 0;
+    if(buttons.pressed & Button::DPAD_RIGHT) dv = 1;
+    if(buttons.pressed & Button::DPAD_LEFT) dv = paint::VARIANTS - 1;
+    if(dv) {
+        style.v[item] = uint8_t((style.v[item] + dv) % paint::VARIANTS);
+        if(colour_owned(item, style.v[item])) {
+            style_kept[item] = style.v[item];
+            store_style();
+        }
+        apply_style();
+        audio::sfx(audio::Sfx::MENU_MOVE);
+    }
+    if(buttons.pressed & (Button::X | Button::Y)) {
+        look_shown ^= uint16_t(1u << item);
+        if(skin_owned(item)) {
+            shop.skins_on = uint16_t((shop.skins_on & ~(1u << item)) | (look_shown & (1u << item)));
+            store_shop();
+        }
+        audio::sfx(audio::Sfx::MENU_MOVE);
+    }
+    if(buttons.pressed & Button::A) {
+        uint32_t price = style_price(item);
+        bool bought = false;
+        if(price && shows_look(item) && !skin_owned(item)) bought = buy_skin(item);
+        else if(price) {
+            bought = buy_colour(item, style.v[item]);
+            if(bought) {
+                style_kept[item] = style.v[item];
+                store_style();
+            }
+        }
+        if(bought) {
+            audio::sfx(audio::Sfx::MISSION);
+            run.flash = 0.15f;
+            run.flash_pen = Pen(255, 200, 60);
+        } else if(price) {
+            audio::sfx(audio::Sfx::SHIELD_POP);
+        }
+    }
 }
 
 void render_style(uint32_t time) {
     dim(170);
     text_shadow("STYLE", outline_font, Point(64, 3), Pen(255, 220, 90), TextAlign::top_center);
+    // the wallet, top right
+    char money[16];
+    snprintf(money, sizeof(money), "%lu", (unsigned long)shop.wallet);
+    int mw = screen.measure_text(money, minimal_font).w;
+    screen.blit(screen.sprites, spr::hud_chili, Point(SW - 3 - mw - 9, 3));
+    text_shadow(money, minimal_font, Point(SW - 2, 4), Pen(255, 220, 120), TextAlign::top_right);
     // preview on a little stage
     Rect box(20, 18, 88, 62);
     screen.pen = Pen(255, 255, 255, 24);
@@ -2240,7 +2432,11 @@ void render_style(uint32_t time) {
     draw_scaled(r, float(box.x + box.w / 2), float(box.y + box.h - 4), sc);
     // name, position and arrows
     char buf[24];
-    text_shadow(paint::items[style_item].name, minimal_font, Point(64, 84), Pen(255, 255, 255), TextAlign::top_center);
+    const bool look = shows_look(style_item);
+    text_shadow(look ? skin_name(style_item) : paint::items[style_item].name, minimal_font, Point(64, 84),
+                look ? Pen(255, 220, 90) : Pen(255, 255, 255), TextAlign::top_center);
+    if(look && !skin_owned(style_item))
+        text_shadow("NEW LOOK", minimal_font, Point(64, box.y + 2), Pen(255, 160, 60), TextAlign::top_center);
     snprintf(buf, sizeof(buf), "%d/%d", style_item + 1, paint::ITEMS);
     text_shadow(buf, minimal_font, Point(box.x + box.w - 2, box.y + 2), Pen(170, 160, 190), TextAlign::top_right);
     int bounce = int((time / 200u) & 1u);
@@ -2261,8 +2457,28 @@ void render_style(uint32_t time) {
             screen.pen = pen_rgb(it.rgb[v][idx]);
             screen.rectangle(Rect(sw.x + k * 6, sw.y - (on ? bounce : 0), 6, sw.h));
         }
+        if(!colour_owned(style_item, v)) {  // locked: dimmed, with a little padlock
+            screen.pen = Pen(0, 0, 0, 150);
+            screen.rectangle(Rect(sw.x, sw.y - (on ? bounce : 0), sw.w, sw.h));
+            screen.pen = Pen(230, 230, 240);
+            int lx = sw.x + sw.w / 2 - 2, ly = sw.y - (on ? bounce : 0) + 4;
+            screen.rectangle(Rect(lx, ly, 5, 4));
+            screen.h_span(Point(lx + 1, ly - 2), 3);
+            screen.pixel(Point(lx, ly - 1));
+            screen.pixel(Point(lx + 4, ly - 1));
+        }
     }
-    text_shadow("UP/DOWN: ITEM  L/R: COLOUR", minimal_font, Point(64, SH - 18), Pen(200, 190, 210), TextAlign::top_center);
+    // what A does here
+    uint32_t price = style_price(style_item);
+    if(price && shop.wallet >= price) {
+        snprintf(buf, sizeof(buf), "A: BUY %lu", (unsigned long)price);
+        text_shadow(buf, minimal_font, Point(64, SH - 18), Pen(120, 255, 140), TextAlign::top_center);
+    } else if(price) {
+        snprintf(buf, sizeof(buf), "NEED %lu MORE", (unsigned long)(price - shop.wallet));
+        text_shadow(buf, minimal_font, Point(64, SH - 18), Pen(255, 120, 100), TextAlign::top_center);
+    } else {
+        text_shadow("Y: LOOK  L/R: COLOUR", minimal_font, Point(64, SH - 18), Pen(200, 190, 210), TextAlign::top_center);
+    }
     if((time / 500u) & 1u) text_shadow("B: BACK", minimal_font, Point(64, SH - 9), Pen(200, 190, 210), TextAlign::top_center);
 }
 
@@ -2610,7 +2826,7 @@ void update(uint32_t time) {
                         }
                         break;
                     case 1: set_state(State::MISSIONS); break;
-                    case 2: set_state(State::STYLE); break;
+                    case 2: open_style(); set_state(State::STYLE); break;
                     case 3: set_state(State::HELP); break;
                     case 4: set_state(State::SETTINGS); menu_cursor = 0; break;
                 }
@@ -2619,24 +2835,9 @@ void update(uint32_t time) {
 
         case State::STYLE: {
             update_run(false);
-            int dv = 0;
-            if(buttons.pressed & Button::DPAD_UP) {
-                style_item = (style_item + paint::ITEMS - 1) % paint::ITEMS;
-                audio::sfx(audio::Sfx::MENU_MOVE);
-            }
-            if(buttons.pressed & Button::DPAD_DOWN) {
-                style_item = (style_item + 1) % paint::ITEMS;
-                audio::sfx(audio::Sfx::MENU_MOVE);
-            }
-            if(buttons.pressed & (Button::DPAD_RIGHT | Button::A)) dv = 1;
-            if(buttons.pressed & Button::DPAD_LEFT) dv = paint::VARIANTS - 1;
-            if(dv) {
-                style.v[style_item] = uint8_t((style.v[style_item] + dv) % paint::VARIANTS);
-                apply_style();
-                store_style();
-                audio::sfx(audio::Sfx::MENU_MOVE);
-            }
+            update_style_menu();
             if(buttons.pressed & Button::B) {
+                close_style();
                 audio::sfx(audio::Sfx::MENU_OK);
                 set_state(State::TITLE);
                 menu_cursor = 2;

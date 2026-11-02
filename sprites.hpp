@@ -1,5 +1,5 @@
 #pragma once
-// Sprite rectangles in assets/sprites.png (128x316 RGBA, transparent background).
+// Sprite rectangles in assets/sprites.png (128x392 RGBA, transparent background).
 // tools/make_sprites.py draws the sheet; keep both files in step.
 #include "32blit.hpp"
 
@@ -40,6 +40,19 @@ const Rect banner_lava = Rect(80, 128, 32, 32);  // HIGH in the volcano: stone a
 // BLOCK obstacles (change lane): parked cars facing the runner; the volcano keeps the spire.
 const Rect car_desert = Rect(0, 200, 32, 28);  // dusty pickup truck
 const Rect car_city   = Rect(32, 200, 32, 28); // neon street racer with underglow
+
+// Bought looks (STYLE menu): each the same size and job as the obstacle it
+// replaces, sharing its paint colours; the cars keep their lamps in place.
+const Rect fence_alt   = Rect(0, 316, 32, 16);   // hay bales
+const Rect cart_alt    = Rect(32, 316, 32, 16);  // roadworks
+const Rect barrier_alt = Rect(64, 316, 32, 16);  // bone pile
+const Rect weed_alt[2] = {Rect(96, 316, 16, 16), Rect(112, 316, 16, 16)}; // rolling tyre
+const Rect banner_alt      = Rect(0, 332, 32, 32);   // ranch gate
+const Rect banner_city_alt = Rect(32, 332, 32, 32);  // sky bridge
+const Rect banner_lava_alt = Rect(64, 332, 32, 32);  // rib arch
+const Rect spire_alt       = Rect(96, 332, 24, 40);  // crystals
+const Rect car_desert_alt  = Rect(0, 364, 32, 28);   // camper van
+const Rect car_city_alt    = Rect(32, 364, 32, 28);  // taxi
 
 // Start-of-run camera move: the hero at twice the detail (32x48, drawn at
 // half scale) turning from facing us to facing away (run[0] is the last
