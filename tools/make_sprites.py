@@ -1677,7 +1677,8 @@ def make_logo():
     text = "CHILI RUSH"
     ramp = [hexc("ffe14a"), hexc("ffc23a"), hexc("ff9a2a"), hexc("ff7020"),
             hexc("f04a28"), hexc("e8302a"), hexc("c41e2a")]
-    widths = [3 if c == " " else len(BIG[c][0]) for c in text]
+    glyphs = dict(BIG)
+    widths = [1 if c == " " else len(glyphs[c][0]) for c in text]
     total = (sum(widths) + len(text) - 1) * sx
     x = (W - 1 - total) // 2
     top = 9
@@ -1685,7 +1686,7 @@ def make_logo():
     flames_at = []
     for ch, w in zip(text, widths):
         if ch != " ":
-            for j, row in enumerate(BIG[ch]):
+            for j, row in enumerate(glyphs[ch]):
                 for i, v in enumerate(row):
                     if v != "#":
                         continue
@@ -1695,7 +1696,7 @@ def make_logo():
                             letters.px(x + i * sx + xx, top + j * sy + yy,
                                        ramp[min(len(ramp) - 1, int(t * len(ramp)))])
             if ch == "I":
-                flames_at.append(x + w * sx // 2)
+                flames_at.append(x + 2 * sx)
         x += (w + 1) * sx
     for y in range(H):
         for xx in range(W):
@@ -1874,7 +1875,7 @@ def main():
     sheet.save(os.path.join(ASSETS, "sprites.png"))
     make_preview(sheet).save(os.path.join(ASSETS, "preview.png"))
     sp = build_sprites()
-    make_splash(splash_hero(), sp["cactus"], sp["agave"]).save(os.path.join(ASSETS, "splash.png"))
+    make_splash(sp["run"][0], sp["cactus"], sp["agave"]).save(os.path.join(ASSETS, "splash.png"))
     make_logo().save(os.path.join(ASSETS, "logo.png"))
     make_run_gif(sp["run"], os.path.join(ASSETS, "run-preview.gif"))
     ref = os.path.join(os.path.dirname(ROOT), "chili-city", "assets", "icon.png")

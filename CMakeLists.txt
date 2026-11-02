@@ -31,6 +31,20 @@ blit_assets_yaml (${PROJECT_NAME} assets.yml)
 blit_metadata (${PROJECT_NAME} metadata.yml)
 add_custom_target (flash DEPENDS ${PROJECT_NAME}.flash)
 
+# Headless self-test: a planning bot plays thousands of seconds and checks
+# that every obstacle pattern can be survived (see README). Desktop only.
+option(CHILI_SELFTEST "Build chili-rush-selftest, the headless fairness and edge-case test" OFF)
+if(CHILI_SELFTEST AND NOT CMAKE_CROSSCOMPILING AND NOT CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
+  add_executable(chili-rush-selftest selftest_main.cpp game.cpp ${CMAKE_CURRENT_BINARY_DIR}/assets.cpp)
+  target_compile_definitions(chili-rush-selftest PRIVATE CHILI_SELFTEST)
+  if(NOT MSVC)
+    target_compile_options(chili-rush-selftest PRIVATE -Wno-double-promotion)  # the test's printf reports
+  endif()
+  target_include_directories(chili-rush-selftest PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+  target_link_libraries(chili-rush-selftest BlitEngine)
+  add_dependencies(chili-rush-selftest ${PROJECT_NAME})  # packs the assets
+endif()
+
 # setup release packages
 install (FILES ${PROJECT_DISTRIBS} DESTINATION .)
 set (CPACK_INCLUDE_TOPLEVEL_DIRECTORY OFF)

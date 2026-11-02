@@ -149,6 +149,15 @@ jobs:
         run: |
           cmake --build . --config $BUILD_TYPE -j 2
 
+      - name: Self-test (fairness bot and edge cases)
+        if: matrix.name == 'Linux'
+        shell: bash
+        working-directory: ${{runner.workspace}}/main/build
+        run: |
+          cmake $GITHUB_WORKSPACE/main -DCHILI_SELFTEST=ON
+          cmake --build . --config $BUILD_TYPE --target chili-rush-selftest -j 2
+          ./chili-rush-selftest --quick
+
       - name: Check the .blit is for the VGC Zero
         if: matrix.name == 'VGC (.blit)'
         shell: bash

@@ -33,6 +33,7 @@ constexpr int PLAYER_FEET_Y = 120;  // screen row of the player's feet
 constexpr float Z_PLAYER = FOCAL / float(PLAYER_FEET_Y - HORIZON);
 constexpr float Z_FAR = 34.0f;      // objects appear here
 constexpr float SEGMENT = 0.5f;     // stripe length on the road
+constexpr float HIT_DEPTH = 0.22f;  // player hitbox along the road, either side of the feet
 constexpr float DT = 0.01f;         // seconds per update()
 
 constexpr float SPEED_START = 7.5f;   // world units per second
@@ -42,6 +43,7 @@ constexpr float SPEED_RAMP = 2600.0f; // distance to get ~63% of the way to max
 constexpr float JUMP_TIME = 0.62f;    // seconds in the air
 constexpr float JUMP_HEIGHT = 0.36f;  // world units
 constexpr float SLIDE_TIME = 0.62f;
+constexpr float FAST_FALL = 2.5f;     // slide pressed in the air: fall this much faster
 constexpr float LANE_TIME = 0.11f;    // seconds to move one lane
 
 constexpr float DASH_TIME = 4.0f;
@@ -53,6 +55,9 @@ constexpr float BIOME_LENGTH = 900.0f; // distance per biome
 constexpr float BIOME_BLEND = 60.0f;   // colours fade over this distance
 
 constexpr float METRES_PER_UNIT = 1.0f;
+// Long runs keep float precision: every REBASE units the run's distances
+// are moved back by REBASE (exactly, a power of two) and counted in Run::origin.
+constexpr float REBASE = 1024.0f;
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -127,7 +132,16 @@ Colours blend(const Biome &a, const Biome &b, float t) {
             mix(a.kerb_a, b.kerb_a, t), mix(a.kerb_b, b.kerb_b, t), mix(a.line, b.line, t), mix(a.fog, b.fog, t)};
 }
 
-int biome_at(float distance) { return int(distance / BIOME_LENGTH) % 3; }
+// Whole units taken off every distance along the road so far (REBASE).
+uint32_t road_origin = 0;
+
+// Units from the start of the run to `distance`, and how far into its biome.
+uint32_t road_units(float distance) { return road_origin + uint32_t(std::max(0.0f, distance)); }
+float total_distance(float distance) { return float(road_origin) + distance; }
+int biome_at(float distance) { return int((road_units(distance) / uint32_t(BIOME_LENGTH)) % 3u); }
+float in_biome(float distance) {
+    return float(road_units(distance) % uint32_t(BIOME_LENGTH)) + (distance - floorf(distance));
+}
 
 // ---------------------------------------------------------------------------
 // Save data: best score, totals, missions and settings in one struct
@@ -234,17 +248,26 @@ void reset_save() {
     save.missions[2] = {M_DISTANCE, 0, 0, mission_target(M_DISTANCE, 0)};
 }
 
-bool save_valid() {
-    if(save.magic != SAVE_MAGIC || save.version != SAVE_VERSION) return false;
-    for(auto &m : save.missions)
-        if(m.type >= M_TYPES || m.target == 0) return false;
-    return true;
+// A save of this version with a damaged mission keeps everything else: the
+// mission is replaced (bad or repeated type) or its target recomputed.
+void repair_save() {
+    for(int i = 0; i < MISSION_SLOTS; i++) {
+        Mission &m = save.missions[i];
+        bool repeat = false;
+        for(int j = 0; j < i; j++) repeat |= save.missions[j].type == m.type;
+        if(m.type >= M_TYPES || repeat) {
+            m.type = M_TYPES;  // not a type: new_mission() ignores it
+            m = new_mission(i);
+        }
+        m.target = mission_target(m.type, m.level);
+    }
+    save.music = save.music ? 1 : 0;
+    save.sound = save.sound ? 1 : 0;
 }
 
 void load_game() {
-    if(!read_save(save) || !save_valid()) reset_save();
-    save.music = save.music ? 1 : 0;
-    save.sound = save.sound ? 1 : 0;
+    if(!read_save(save) || save.magic != SAVE_MAGIC || save.version != SAVE_VERSION) reset_save();
+    repair_save();
 }
 
 void store_game() { write_save(save); }
@@ -290,6 +313,14 @@ struct Obj {
 constexpr int MAX_OBJS = 256;
 Obj objs[MAX_OBJS];
 
+#ifdef CHILI_SELFTEST
+// hooks for the headless self-test (selftest.hpp)
+void st_spawned(Obj &o);
+int st_pool_full = 0;
+void st_profile(int phase);  // render timing
+bool st_ghost = false;  // the test bot passes through obstacles
+#endif
+
 Obj *spawn(Kind k, float x, float s, float h = 0.0f) {
     for(auto &o : objs) {
         if(o.kind == K_NONE) {
@@ -299,13 +330,20 @@ Obj *spawn(Kind k, float x, float s, float h = 0.0f) {
             o.s = s;
             o.h = h;
             o.biome = uint8_t(biome_at(s));
+#ifdef CHILI_SELFTEST
+            st_spawned(o);
+#endif
             return &o;
         }
     }
+#ifdef CHILI_SELFTEST
+    st_pool_full++;
+#endif
     return nullptr; // pool full: skip (generation keeps well under the limit)
 }
 
 float lane_x(int lane) { return float(lane - 1) * LANE_W; }
+bool in_lane_of(const Obj &o, float x) { return fabsf(o.x - x) < LANE_W * 0.55f; }
 
 // ---------------------------------------------------------------------------
 // Particles and pop-up texts
@@ -349,6 +387,16 @@ void popup(const char *text, float x, float y, Pen pen) {
         if(p.life <= 0.0f) { slot = &p; break; }
         if(p.life < slot->life) slot = &p;
     }
+    // stack under the live ones instead of drawing on top of them
+    for(int pass = 0; pass < MAX_POPUPS; pass++) {
+        bool moved = false;
+        for(auto &p : popups)
+            if(&p != slot && p.life > 0.0f && fabsf(p.y - y) < 9.0f) {
+                y = p.y + 9.0f;
+                moved = true;
+            }
+        if(!moved) break;
+    }
     snprintf(slot->text, sizeof(slot->text), "%s", text);
     slot->x = x;
     slot->y = y;
@@ -359,26 +407,121 @@ void popup(const char *text, float x, float y, Pen pen) {
 // ---------------------------------------------------------------------------
 // Game state
 
-enum class State { TITLE, MISSIONS, SETTINGS, HELP, READY, RUN, PAUSE, CRASH, OVER };
+enum class State { TITLE, MISSIONS, SETTINGS, HELP, READY, RUN, PAUSE, RESUME, CRASH, OVER };
 State state = State::TITLE;
 float state_time = 0.0f;
+int state_ticks = 0;  // updates in this state: exact timing for countdowns
+int run_ticks_since_go = 1000;  // the big "GO!" shows for the first 0.35 s of a run
 
 void set_state(State s) {
     state = s;
     state_time = 0.0f;
+    state_ticks = 0;
+}
+
+// ---------------------------------------------------------------------------
+// The runner's body: lane, jump and slide. Pure functions with no effects,
+// so the self-test's planner (CHILI_SELFTEST) moves exactly like the game.
+
+struct Body {
+    int lane;
+    float x;            // lateral position, eases to the lane
+    float jump_t;       // >0 while in the air, counts up to JUMP_TIME
+    float slide_t;      // >0 while sliding
+    float jump_buffer;  // >0: jump pressed just before landing; <0: slide queued
+    bool fast_fall;     // slide pressed in the air: dropping to the ground
+};
+
+enum BodyEvent : uint8_t { EV_JUMP = 1, EV_SLIDE = 2, EV_LAND = 4, EV_LANE = 8, EV_KERB = 16 };
+
+bool body_in_air(const Body &b) { return b.jump_t > 0.0f; }
+bool body_sliding(const Body &b) { return b.slide_t > 0.0f; }
+
+float body_height(const Body &b) {
+    if(!body_in_air(b)) return 0.0f;
+    float t = b.jump_t / JUMP_TIME;  // 0..1
+    return JUMP_HEIGHT * 4.0f * t * (1.0f - t);
+}
+
+uint8_t body_jump(Body &b) {
+    if(body_in_air(b)) {
+        b.jump_buffer = 0.12f;
+        return 0;
+    }
+    b.slide_t = 0.0f;
+    b.jump_t = 0.0001f;
+    b.fast_fall = false;
+    return EV_JUMP;
+}
+
+uint8_t body_slide(Body &b) {
+    if(body_in_air(b)) {
+        // drop out of the air fast and slide on landing; still rising: carry
+        // on from the same height on the way down, so the runner never snaps
+        if(b.jump_t < JUMP_TIME * 0.5f) b.jump_t = JUMP_TIME - b.jump_t;
+        b.fast_fall = true;
+        b.slide_t = 0.0f;
+        b.jump_buffer = -0.2f;  // negative: slide queued
+        return 0;
+    }
+    uint8_t ev = body_sliding(b) ? 0 : EV_SLIDE;
+    b.slide_t = 0.0001f;
+    return ev;
+}
+
+uint8_t body_lane(Body &b, int dir) {
+    int lane = std::clamp(b.lane + dir, 0, 2);
+    if(lane == b.lane) return EV_KERB;
+    b.lane = lane;
+    return EV_LANE;
+}
+
+// One update (DT) of the body.
+uint8_t body_step(Body &b) {
+    uint8_t ev = 0;
+    // ease towards the lane
+    // ease out: fast start, soft arrival; a minimum step so it always lands
+    float target = float(b.lane - 1) * LANE_W;
+    float delta = target - b.x;
+    float step = delta * (DT / (LANE_TIME * 0.38f));
+    float min_step = LANE_W * DT / (LANE_TIME * 2.5f);
+    if(fabsf(step) < min_step) step = delta > 0.0f ? min_step : -min_step;
+    if(fabsf(delta) <= fabsf(step)) b.x = target;
+    else b.x += step;
+
+    if(body_in_air(b)) {
+        b.jump_t += b.fast_fall ? DT * FAST_FALL : DT;
+        if(b.jump_t >= JUMP_TIME) {
+            b.jump_t = 0.0f;
+            b.fast_fall = false;
+            ev |= EV_LAND;
+            if(b.jump_buffer > 0.0f) {
+                b.jump_buffer = 0.0f;
+                ev |= body_jump(b);
+            } else if(b.jump_buffer < 0.0f) {
+                b.jump_buffer = 0.0f;
+                b.slide_t = 0.0001f;
+                ev |= EV_SLIDE;
+            }
+        }
+    }
+    if(b.jump_buffer > 0.0f) b.jump_buffer = std::max(0.0f, b.jump_buffer - DT);
+
+    if(body_sliding(b)) {
+        b.slide_t += DT;
+        if(b.slide_t >= SLIDE_TIME) b.slide_t = 0.0f;
+    }
+    return ev;
 }
 
 struct Run {
-    float distance;      // the player's position along the road
+    float distance;      // the player's position along the road, from road_origin
     float speed;
     float cam_x;
     // player
-    int lane;
-    float x;              // lateral position, eases to the lane
-    float jump_t;         // >0 while in the air, counts up to JUMP_TIME
-    float slide_t;        // >0 while sliding
+    Body p;
     float lane_change_t;  // time since last lane change (close calls)
-    float jump_buffer;    // jump pressed just before landing
+    int prev_lane;        // the lane before the last change
     float run_anim;
     float land_t;          // >0 just after landing: squash frame
     // power
@@ -398,6 +541,7 @@ struct Run {
     float next_spawn;     // distance of the next obstacle row
     float next_decor;
     float next_power;
+    float last_row;       // distance of the last obstacle row
     float curve, curve_target, next_curve;
     float bg_scroll;
     // feedback
@@ -409,6 +553,7 @@ struct Run {
     int missions_completed_this_run;
     int last_biome;
     float biome_banner;
+    bool recorded;        // totals and best saved for this run
 };
 Run run;
 
@@ -417,6 +562,11 @@ float view_dx = 0.0f, view_dy = 0.0f; // screen shake offset
 int menu_cursor = 0;
 bool attract = true; // the title screen road runs by itself
 
+// Sounds of the run itself; the title screen demo plays none of them.
+void world_sfx(audio::Sfx s) {
+    if(!attract) audio::sfx(s);
+}
+
 // Frame rate counter, toggled with X on the title screen (for testing on the console).
 bool show_fps = false;
 uint32_t fps_frames = 0, fps_last = 0, fps_value = 0, frame_us = 0;
@@ -424,10 +574,12 @@ uint32_t fps_frames = 0, fps_last = 0, fps_value = 0, frame_us = 0;
 // ---------------------------------------------------------------------------
 // Missions progress
 
+uint32_t run_metres() { return uint32_t(total_distance(run.distance) * METRES_PER_UNIT); }
+
 uint32_t mission_value(uint8_t type) {
     switch(type) {
         case M_CHILIS:   return run.chilis;
-        case M_DISTANCE: return uint32_t(run.distance * METRES_PER_UNIT);
+        case M_DISTANCE: return run_metres();
         case M_JUMPS:    return run.jumps_over;
         case M_SLIDES:   return run.slides_under;
         case M_CLOSE:    return run.close_calls;
@@ -450,8 +602,8 @@ void check_missions() {
         if(mission_value(save.missions[i].type) >= save.missions[i].target) {
             mission_complete[i] = true;
             run.missions_completed_this_run++;
-            audio::sfx(audio::Sfx::MISSION);
-            popup("MISSION!", 64, 40, Pen(120, 255, 140));
+            world_sfx(audio::Sfx::MISSION);
+            popup("MISSION!", 64, 46, Pen(120, 255, 140));
         }
     }
 }
@@ -481,7 +633,7 @@ float min_gap() {
 }
 
 // Difficulty 0..1 by distance.
-float difficulty() { return clampf(run.distance / 4000.0f, 0.0f, 1.0f); }
+float difficulty() { return clampf(total_distance(run.distance) / 4000.0f, 0.0f, 1.0f); }
 
 void chili_line(int lane, float s, int count, float step) {
     for(int i = 0; i < count; i++) spawn(K_CHILI, lane_x(lane), s + float(i) * step);
@@ -509,8 +661,9 @@ void spawn_row(float s) {
     float d = difficulty();
     Kind lane_kind[3] = {K_NONE, K_NONE, K_NONE};
 
+    bool weed = false;
     int pattern = rnd_int(100);
-    if(run.distance < 120.0f) {
+    if(total_distance(run.distance) < 120.0f) {
         // first rows of a run: one easy obstacle at a time, to warm up
         lane_kind[rnd_int(3)] = (rnd_int(2) ? K_LOW : K_BLOCK);
     } else if(pattern < 25) {
@@ -530,7 +683,8 @@ void spawn_row(float s) {
         int open = rnd_int(3);
         for(int l = 0; l < 3; l++) lane_kind[l] = (l == open) ? random_passable(d) : K_BLOCK;
     } else {
-        // a tumbleweed rolling across, plus maybe one block
+        // a tumbleweed rolling across, plus maybe a sign in the middle lane
+        weed = true;
         int from = chance(0.5f) ? 0 : 2;
         Obj *w = spawn(K_WEED, lane_x(from), s);
         if(w) {
@@ -547,23 +701,43 @@ void spawn_row(float s) {
     int free_lanes[3], nf = 0;
     for(int l = 0; l < 3; l++)
         if(lane_kind[l] == K_NONE) free_lanes[nf++] = l;
+    int line_lane = -1;
     if(nf > 0 && chance(0.75f)) {
-        int l = free_lanes[rnd_int(nf)];
+        line_lane = free_lanes[rnd_int(nf)];
         // stays clear of the next row, which is at least min_gap() * 1.1 away
         int most = int(min_gap() * 1.4f / 0.7f);
-        chili_line(l, s - min_gap() * 0.45f, std::min(4 + rnd_int(4), most), 0.7f);
+        // a tumbleweed rolls through every lane: end the line before it
+        if(weed) most = int((min_gap() * 0.45f - (HIT_DEPTH + 0.4f)) / 0.7f) + 1;
+        chili_line(line_lane, s - min_gap() * 0.45f, std::min(4 + rnd_int(4), most), 0.7f);
     } else {
         for(int l = 0; l < 3; l++)
             if(lane_kind[l] == K_LOW && chance(0.7f)) { chili_arc(l, s); break; }
     }
 
-    // golden chili now and then, in a free lane right after the row
-    if(nf > 0 && chance(0.04f + 0.04f * d)) spawn(K_GOLDEN, lane_x(free_lanes[rnd_int(nf)]), s + 1.5f);
+    // golden chili now and then, in a free lane right after the row (not
+    // on top of the chili line)
+    if(nf > 0 && chance(0.04f + 0.04f * d)) {
+        int i = rnd_int(nf);
+        int l = free_lanes[i];
+        if(l == line_lane) l = nf > 1 ? free_lanes[(i + 1 + rnd_int(nf - 1)) % nf] : -1;
+        if(l >= 0) spawn(K_GOLDEN, lane_x(l), s + 1.5f);
+    }
 }
 
+// A shield or a magnet at s, in a lane with no chilis close by.
 void spawn_power(float s) {
     Kind k = chance(0.5f) ? K_MILK : K_SOMBRERO;
-    spawn(k, lane_x(rnd_int(3)), s, 0.05f);
+    int first = rnd_int(3);
+    for(int i = 0; i < 3; i++) {
+        int lane = (first + i) % 3;
+        bool clear = true;
+        for(auto &o : objs)
+            if(is_pickup(o.kind) && fabsf(o.s - s) < 1.0f && in_lane_of(o, lane_x(lane))) clear = false;
+        if(clear || i == 2) {
+            spawn(k, lane_x(lane), s, 0.05f);
+            return;
+        }
+    }
 }
 
 void spawn_decor(float s) {
@@ -577,12 +751,13 @@ void spawn_decor(float s) {
 void update_generation() {
     float horizon_s = run.distance + Z_FAR;
     while(run.next_spawn < horizon_s) {
-        // free space before a power-up so it is not inside a row
+        // a power-up halfway between two rows, never inside one
         if(run.next_power < run.next_spawn) {
-            spawn_power(run.next_power);
+            spawn_power((run.last_row + run.next_spawn) * 0.5f);
             run.next_power += 220.0f + rnd_float() * 180.0f;
         }
         spawn_row(run.next_spawn);
+        run.last_row = run.next_spawn;
         float d = difficulty();
         float gap = min_gap() * lerpf(1.9f, 1.1f, d) + rnd_float() * min_gap() * lerpf(1.2f, 0.5f, d);
         run.next_spawn += gap;
@@ -599,14 +774,16 @@ void update_generation() {
 void start_run(bool demo) {
     attract = demo;
     run = Run{};
+    road_origin = 0;
     for(auto &o : objs) o.kind = K_NONE;
     for(auto &p : particles) p.life = 0.0f;
     for(auto &p : popups) p.life = 0.0f;
     for(auto &m : mission_complete) m = false;
     rng_state = (now() * 2654435761u) ^ 0xa5a5a5a5u;
     if(!rng_state) rng_state = 1;
-    run.lane = 1;
-    run.x = 0.0f;
+    run.p.lane = 1;
+    run.prev_lane = 1;
+    run.p.x = 0.0f;
     run.speed = SPEED_START;
     run.next_spawn = 16.0f;
     run.next_decor = 0.0f;
@@ -621,48 +798,29 @@ void start_run(bool demo) {
 // ---------------------------------------------------------------------------
 // Player actions
 
-bool in_air() { return run.jump_t > 0.0f; }
-bool sliding() { return run.slide_t > 0.0f; }
+bool in_air() { return body_in_air(run.p); }
+bool sliding() { return body_sliding(run.p); }
 bool dashing() { return run.dash_t > 0.0f; }
-
-float jump_height() {
-    if(!in_air()) return 0.0f;
-    float t = run.jump_t / JUMP_TIME;  // 0..1
-    return JUMP_HEIGHT * 4.0f * t * (1.0f - t);
-}
+float jump_height() { return body_height(run.p); }
 
 void do_jump() {
-    if(in_air()) {
-        run.jump_buffer = 0.12f;
-        return;
-    }
-    run.slide_t = 0.0f;
-    run.jump_t = 0.0001f;
-    audio::sfx(audio::Sfx::JUMP);
+    if(body_jump(run.p) & EV_JUMP) world_sfx(audio::Sfx::JUMP);
 }
 
 void do_slide() {
-    if(in_air()) {
-        // drop out of the air fast and slide on landing
-        run.jump_t = std::max(run.jump_t, JUMP_TIME * 0.82f);
-        run.slide_t = 0.0f;
-        run.jump_buffer = -0.2f;  // negative: slide queued
-        return;
-    }
-    if(!sliding()) audio::sfx(audio::Sfx::SLIDE);
-    run.slide_t = 0.0001f;
+    if(body_slide(run.p) & EV_SLIDE) world_sfx(audio::Sfx::SLIDE);
 }
 
 void change_lane(int dir) {
-    int lane = std::clamp(run.lane + dir, 0, 2);
-    if(lane == run.lane) {
+    int from = run.p.lane;
+    if(body_lane(run.p, dir) & EV_KERB) {
         // bumping the kerb: small shake, no penalty
         run.shake = std::max(run.shake, 0.06f);
         return;
     }
-    run.lane = lane;
+    run.prev_lane = from;
     run.lane_change_t = 0.0f;
-    audio::sfx(audio::Sfx::LANE);
+    world_sfx(audio::Sfx::LANE);
 }
 
 void start_dash() {
@@ -672,7 +830,7 @@ void start_dash() {
     run.dashes++;
     run.flash = 0.25f;
     run.flash_pen = Pen(255, 160, 40);
-    audio::sfx(audio::Sfx::DASH_START);
+    world_sfx(audio::Sfx::DASH_START);
     audio::play(audio::Track::DASH);
     popup("FIRE DASH!", 64, 52, Pen(255, 200, 60));
 }
@@ -698,14 +856,24 @@ Screen project(float x, float h, float z) {
 
 float depth_of(const Obj &o) { return o.s - run.distance + Z_PLAYER; }
 
-// Player hitbox along the road, in world units either side of the feet.
-constexpr float HIT_DEPTH = 0.22f;
 
 // ---------------------------------------------------------------------------
 // Crash
 
+// Count the run in the save, once, however it ends (crash, quit, power off):
+// runs, chilis, best score and distance. Missions reached by now count too.
+void record_run() {
+    if(attract || run.recorded) return;
+    check_missions();
+    run.recorded = true;
+    save.runs++;
+    save.total_chilis += run.chilis;
+    save.best_distance = std::max(save.best_distance, run_metres());
+    save.best = std::max(save.best, run.score);
+}
+
 void crash() {
-    audio::sfx(audio::Sfx::HIT);
+    world_sfx(audio::Sfx::HIT);
     audio::play(audio::Track::NONE);
     run.shake = 0.5f;
     run.flash = 0.2f;
@@ -714,14 +882,8 @@ void crash() {
     set_state(State::CRASH);
 
     // results and saving happen once, here
-    save.runs++;
-    save.total_chilis += run.chilis;
-    uint32_t metres = uint32_t(run.distance * METRES_PER_UNIT);
-    if(metres > save.best_distance) save.best_distance = metres;
-    if(run.score > save.best) {
-        save.best = run.score;
-        run.new_best = best_at_start > 0;  // the first run is always a best, no fanfare
-    }
+    if(run.score > save.best) run.new_best = best_at_start > 0;  // the first run is always a best, no fanfare
+    record_run();
     store_game();
 }
 
@@ -744,9 +906,9 @@ void collect(Obj &o) {
             run.best_combo = std::max(run.best_combo, run.combo);
             run.heat = std::min(1.0f, run.heat + (dashing() ? 0.0f : 0.025f));
             add_score(uint32_t(10 * multiplier()));
-            audio::sfx_combo(std::min(10, 1 + run.combo / 3));
+            if(!attract) audio::sfx_combo(std::min(10, 1 + run.combo / 3));
             burst(p.x, p.y - 6, 5, Pen(255, 220, 80), 30.0f);
-            if(run.combo > 0 && run.combo % 10 == 0) {
+            if(run.combo > 0 && run.combo % 10 == 0 && run.combo / 10 <= 4) {  // the multiplier went up
                 char buf[16];
                 snprintf(buf, sizeof(buf), "X%d!", multiplier());
                 popup(buf, 64, 60, Pen(255, 240, 120));
@@ -756,19 +918,19 @@ void collect(Obj &o) {
         case K_GOLDEN:
             run.heat = 1.0f;
             add_score(uint32_t(100 * multiplier()));
-            audio::sfx(audio::Sfx::GOLDEN);
+            world_sfx(audio::Sfx::GOLDEN);
             burst(p.x, p.y - 6, 14, Pen(255, 230, 60), 50.0f, 2);
             popup("HEAT FULL!", 64, 52, Pen(255, 200, 60));
             break;
         case K_MILK:
             run.shield = true;
-            audio::sfx(audio::Sfx::POWERUP);
+            world_sfx(audio::Sfx::POWERUP);
             burst(p.x, p.y - 6, 12, Pen(240, 250, 255), 40.0f, 2);
             popup("SHIELD", 64, 52, Pen(220, 240, 255));
             break;
         case K_SOMBRERO:
             run.magnet_t = MAGNET_TIME;
-            audio::sfx(audio::Sfx::POWERUP);
+            world_sfx(audio::Sfx::POWERUP);
             burst(p.x, p.y - 6, 12, Pen(255, 200, 80), 40.0f, 2);
             popup("MAGNET", 64, 52, Pen(255, 210, 120));
             break;
@@ -776,13 +938,31 @@ void collect(Obj &o) {
     }
 }
 
-// Is the player clear of this obstacle right now?
-bool avoids(const Obj &o) {
-    switch(o.kind) {
+// Is the body clear of this kind of obstacle (jumping or sliding)?
+bool clears(const Body &b, Kind k) {
+    switch(k) {
         case K_LOW:
-        case K_WEED: return jump_height() > 0.12f;
-        case K_HIGH: return sliding();
+        case K_WEED: return body_height(b) > 0.12f;
+        case K_HIGH: return body_sliding(b);
         default: return false;
+    }
+}
+
+
+// Does the obstacle hit a body whose feet are at `distance`?
+bool hits(const Body &b, const Obj &o, float distance) {
+    return is_obstacle(o.kind) && fabsf(o.s - distance) < HIT_DEPTH && in_lane_of(o, b.x) && !clears(b, o.kind);
+}
+
+// Tumbleweed: starts rolling once it is close enough to be seen (depth z),
+// then rolls from side to side.
+void roll_weed(Obj &o, float z) {
+    if(z >= 16.0f) return;
+    o.x += o.vx * DT;
+    if((o.vx > 0.0f && o.x > o.target_x) || (o.vx < 0.0f && o.x < o.target_x)) {
+        o.x = o.target_x;
+        o.vx = -o.vx;
+        o.target_x = lane_x(2) - o.target_x + lane_x(0);  // bounce back to the other side
     }
 }
 
@@ -791,12 +971,18 @@ void obstacle_hit(Obj &o) {
         o.done = true;  // the title screen demo never crashes
         return;
     }
+#ifdef CHILI_SELFTEST
+    if(st_ghost) {
+        o.done = true;
+        return;
+    }
+#endif
     if(dashing()) {
         o.smashed = true;
         o.done = true;
         run.smashed++;
         add_score(uint32_t(50 * multiplier()));
-        audio::sfx(audio::Sfx::SMASH);
+        world_sfx(audio::Sfx::SMASH);
         run.shake = std::max(run.shake, 0.15f);
         Screen p = project(o.x, 0.0f, std::max(depth_of(o), 0.5f));
         burst(p.x, p.y - 10, 14, Pen(255, 140, 40), 60.0f, 2);
@@ -811,7 +997,7 @@ void obstacle_hit(Obj &o) {
         run.grace_t = GRACE_TIME;
         o.done = true;
         o.smashed = true;
-        audio::sfx(audio::Sfx::SHIELD_POP);
+        world_sfx(audio::Sfx::SHIELD_POP);
         run.shake = 0.25f;
         run.flash = 0.15f;
         run.flash_pen = Pen(230, 240, 255);
@@ -822,7 +1008,7 @@ void obstacle_hit(Obj &o) {
 }
 
 void update_objects() {
-    float px = run.x;
+    float px = run.p.x;
     for(auto &o : objs) {
         if(o.kind == K_NONE) continue;
         float z = depth_of(o);
@@ -833,17 +1019,7 @@ void update_objects() {
             continue;
         }
 
-        if(o.kind == K_WEED && !o.done) {
-            // starts rolling once it is close enough to be seen
-            if(z < 16.0f) {
-                o.x += o.vx * DT;
-                if((o.vx > 0.0f && o.x > o.target_x) || (o.vx < 0.0f && o.x < o.target_x)) {
-                    o.x = o.target_x;
-                    o.vx = -o.vx;
-                    o.target_x = lane_x(2) - o.target_x + lane_x(0);  // bounce back to the other side
-                }
-            }
-        }
+        if(o.kind == K_WEED && !o.done) roll_weed(o, z);
 
         // magnet pulls chilis into the player's lane
         if(o.kind == K_CHILI && !o.done && run.magnet_t > 0.0f && z < 9.0f) {
@@ -876,7 +1052,7 @@ void update_objects() {
 
         if(is_obstacle(o.kind)) {
             if(fabsf(dz) < HIT_DEPTH && same_lane) {
-                if(!avoids(o)) {
+                if(hits(run.p, o, run.distance)) {
                     obstacle_hit(o);
                     if(state != State::RUN) return;
                 }
@@ -887,11 +1063,11 @@ void update_objects() {
                     if(o.kind == K_LOW || o.kind == K_WEED) run.jumps_over++;
                     if(o.kind == K_HIGH) run.slides_under++;
                     add_score(uint32_t(5 * multiplier()));
-                } else if(fabsf(o.x - px) < LANE_W * 1.3f && run.lane_change_t < 0.3f && !dashing()) {
-                    // dodged into the next lane at the last moment
+                } else if(in_lane_of(o, lane_x(run.prev_lane)) && run.lane_change_t < 0.3f && !dashing()) {
+                    // dodged out of its lane at the last moment
                     run.close_calls++;
                     add_score(uint32_t(25 * multiplier()));
-                    audio::sfx(audio::Sfx::NEAR_MISS);
+                    world_sfx(audio::Sfx::NEAR_MISS);
                     popup("CLOSE!", 64, 70, Pen(120, 230, 255));
                     run.heat = std::min(1.0f, run.heat + 0.06f);
                 }
@@ -901,51 +1077,43 @@ void update_objects() {
 }
 
 void update_player() {
-    // ease towards the lane
-    // ease out: fast start, soft arrival; a minimum step so it always lands
-    float target = lane_x(run.lane);
-    float delta = target - run.x;
-    float step = delta * (DT / (LANE_TIME * 0.38f));
-    float min_step = LANE_W * DT / (LANE_TIME * 2.5f);
-    if(fabsf(step) < min_step) step = delta > 0.0f ? min_step : -min_step;
-    if(fabsf(delta) <= fabsf(step)) run.x = target;
-    else run.x += step;
+    uint8_t ev = body_step(run.p);
     if(run.land_t > 0.0f) run.land_t = std::max(0.0f, run.land_t - DT);
     run.lane_change_t += DT;
-
-    if(in_air()) {
-        run.jump_t += DT;
-        if(run.jump_t >= JUMP_TIME) {
-            run.jump_t = 0.0f;
-            run.land_t = 0.09f;
-            audio::sfx(audio::Sfx::LAND);
-            burst(64, float(PLAYER_FEET_Y), 4, Pen(200, 170, 140), 20.0f);
-            if(run.jump_buffer > 0.0f) {
-                run.jump_buffer = 0.0f;
-                do_jump();
-            } else if(run.jump_buffer < 0.0f) {
-                run.jump_buffer = 0.0f;
-                run.slide_t = 0.0001f;
-                audio::sfx(audio::Sfx::SLIDE);
-            }
-        }
+    if(ev & EV_LAND) {
+        run.land_t = 0.09f;
+        world_sfx(audio::Sfx::LAND);
+        burst(64, float(PLAYER_FEET_Y), 4, Pen(200, 170, 140), 20.0f);
     }
-    if(run.jump_buffer > 0.0f) run.jump_buffer = std::max(0.0f, run.jump_buffer - DT);
-
-    if(sliding()) {
-        run.slide_t += DT;
-        if(run.slide_t >= SLIDE_TIME) run.slide_t = 0.0f;
-    }
+    if(ev & EV_JUMP) world_sfx(audio::Sfx::JUMP);
+    if(ev & EV_SLIDE) world_sfx(audio::Sfx::SLIDE);
 
     // 8 frames per stride; stride rate grows with speed but less than linearly
-    run.run_anim += DT * (9.0f + run.speed * 0.9f);
+    run.run_anim = fmodf(run.run_anim + DT * (9.0f + run.speed * 0.9f), 8.0f);
+}
+
+// Move every distance along the road back by REBASE, exactly, so a run of
+// hours keeps the same precision as the first kilometre.
+void rebase() {
+    road_origin += uint32_t(REBASE);
+    run.distance -= REBASE;
+    for(auto &o : objs) o.s -= REBASE;
+    run.next_spawn -= REBASE;
+    run.next_decor -= REBASE;
+    run.next_power -= REBASE;
+    run.next_curve -= REBASE;
+    run.last_row -= REBASE;
+}
+
+// Speed eases up with distance, extra during a dash. One update's step.
+float next_speed(float speed, float distance, bool dash) {
+    float base = SPEED_START + (SPEED_MAX - SPEED_START) * (1.0f - expf(-total_distance(distance) / SPEED_RAMP));
+    return lerpf(speed, base * (dash ? DASH_SPEED : 1.0f), 0.03f);
 }
 
 void update_run(bool input) {
     // speed: eases up with distance, extra during a dash
-    float base = SPEED_START + (SPEED_MAX - SPEED_START) * (1.0f - expf(-run.distance / SPEED_RAMP));
-    float want = base * (dashing() ? DASH_SPEED : 1.0f);
-    run.speed = lerpf(run.speed, want, 0.03f);
+    run.speed = next_speed(run.speed, run.distance, dashing());
 
     if(input) {
         if(buttons.pressed & Button::DPAD_LEFT) change_lane(-1);
@@ -960,12 +1128,23 @@ void update_run(bool input) {
             if(!is_obstacle(o.kind) || o.done) continue;
             float dz = o.s - run.distance;
             if(dz < 0.0f || dz > look) continue;
-            if(fabsf(o.x - lane_x(run.lane)) > LANE_W * 0.5f) continue;
+            if(fabsf(o.x - lane_x(run.p.lane)) > LANE_W * 0.5f) continue;
             if(o.kind == K_LOW && dz < run.speed * 0.2f) do_jump();
             else if(o.kind == K_HIGH && dz < run.speed * 0.15f) do_slide();
             else if(o.kind == K_BLOCK || o.kind == K_WEED) {
-                int l = run.lane == 1 ? (chance(0.5f) ? 0 : 2) : 1;
-                run.lane = l;
+                // move to the nearest lane with nothing coming
+                const int order[3][3] = {{1, 2, 0}, {chance(0.5f) ? 0 : 2, 0, 2}, {1, 0, 2}};
+                for(int l : order[run.p.lane]) {
+                    bool clear = l != run.p.lane;
+                    for(auto &q : objs)
+                        if(is_obstacle(q.kind) && !q.done && q.s - run.distance > -0.3f && q.s - run.distance < look &&
+                           in_lane_of(q, lane_x(l)))
+                            clear = false;
+                    if(clear) {
+                        run.p.lane = l;
+                        break;
+                    }
+                }
             }
         }
     }
@@ -980,6 +1159,7 @@ void update_run(bool input) {
         add_score(whole);
         run.score_frac -= float(whole);
     }
+    if(run.distance >= 2.0f * REBASE) rebase();
 
     // road curves: a new random bend every so often
     if(run.distance > run.next_curve) {
@@ -990,7 +1170,7 @@ void update_run(bool input) {
     run.bg_scroll += run.curve * run.speed * DT * 220.0f;
 
     // camera follows the player a little behind
-    run.cam_x = lerpf(run.cam_x, run.x * 0.75f, 0.15f);
+    run.cam_x = lerpf(run.cam_x, run.p.x * 0.75f, 0.15f);
 
     update_player();
     update_generation();
@@ -1030,8 +1210,8 @@ void update_run(bool input) {
         check_missions();
         if(!run.new_best && best_at_start > 0 && run.score > best_at_start) {
             run.new_best = true;
-            audio::sfx(audio::Sfx::NEW_BEST);
-            popup("NEW BEST!", 64, 40, Pen(255, 240, 120));
+            world_sfx(audio::Sfx::NEW_BEST);
+            popup("NEW BEST!", 64, 46, Pen(255, 240, 120));
         }
     }
 }
@@ -1047,7 +1227,7 @@ void update_effects() {
     for(auto &p : popups) {
         if(p.life <= 0.0f) continue;
         p.life -= DT;
-        p.y -= 18.0f * DT;
+        p.y -= 10.0f * DT;  // 9 px over its life: never up into the biome banner
     }
     if(run.shake > 0.0f) run.shake = std::max(0.0f, run.shake - DT);
     if(run.flash > 0.0f) run.flash = std::max(0.0f, run.flash - DT);
@@ -1057,47 +1237,73 @@ void update_effects() {
 // Rendering: background
 
 Colours colours_now(float distance) {
-    float in_biome = fmodf(distance, BIOME_LENGTH);
+    float into = in_biome(distance);
     int b = biome_at(distance);
-    if(in_biome > BIOME_LENGTH - BIOME_BLEND) {
-        float t = (in_biome - (BIOME_LENGTH - BIOME_BLEND)) / BIOME_BLEND;
+    if(into > BIOME_LENGTH - BIOME_BLEND) {
+        float t = (into - (BIOME_LENGTH - BIOME_BLEND)) / BIOME_BLEND;
         return blend(biomes[b], biomes[(b + 1) % 3], t);
     }
     return blend(biomes[b], biomes[b], 0.0f);
 }
 
-// Mountain or skyline height at a screen column for the given biome.
-int far_height(int biome, int x, float scroll) {
-    float fx = float(x) + scroll * 0.3f;
+// Mountain or skyline height at world column fx (screen column plus the
+// whole-pixel scroll) for the given biome.
+int far_height(int biome, int32_t fx) {
     if(biome == 1) {
         // city: blocky towers
-        int block = int(floorf(fx / 9.0f));
+        int block = int(floorf(float(fx) / 9.0f));
         return 8 + int(hash32(uint32_t(block) + 77u) % 18u);
     }
+    float f = float(fx);
     if(biome == 2) {
         // volcano: a big cone in the middle of the panorama plus ridges
-        float c = fmodf(fx, 256.0f);
-        if(c < 0.0f) c += 256.0f;
+        float c = float(((fx % 256) + 256) % 256);
         float cone = 26.0f - fabsf(c - 128.0f) * 0.45f;
-        float ridge = 6.0f + 4.0f * sinf(fx * 0.05f) + 3.0f * sinf(fx * 0.13f);
+        float ridge = 6.0f + 4.0f * sinf(f * 0.05f) + 3.0f * sinf(f * 0.13f);
         if(cone > 22.0f) cone = 22.0f + (cone - 22.0f) * 0.2f;  // flat crater top
         return int(std::max(cone, ridge));
     }
-    return int(12.0f + 6.0f * sinf(fx * 0.031f) + 4.0f * sinf(fx * 0.077f + 1.0f) + 2.0f * sinf(fx * 0.19f));
+    return int(12.0f + 6.0f * sinf(f * 0.031f) + 4.0f * sinf(f * 0.077f + 1.0f) + 2.0f * sinf(f * 0.19f));
 }
 
-int near_height(int biome, int x, float scroll) {
-    float fx = float(x) + scroll;
+int near_height(int biome, int32_t fx) {
     if(biome == 1) {
-        int block = int(floorf(fx / 6.0f));
+        int block = int(floorf(float(fx) / 6.0f));
         return 3 + int(hash32(uint32_t(block) * 3u + 5u) % 9u);
     }
-    return int(5.0f + 3.0f * sinf(fx * 0.06f + 2.0f) + 2.0f * sinf(fx * 0.15f));
+    float f = float(fx);
+    return int(5.0f + 3.0f * sinf(f * 0.06f + 2.0f) + 2.0f * sinf(f * 0.15f));
 }
 
-void render_sky(const Colours &c, int biome, uint32_t time) {
+// Heights by world column, kept while they are on screen: a bend scrolls
+// the hills a pixel or two per frame, so only those columns call sinf(),
+// the costliest part of a frame on the RP2350.
+struct HillCache {
+    int biome = -1;
+    int32_t tag[256];
+    int8_t h[256];
+
+    void heights(int b, int32_t first, int (*f)(int, int32_t), int8_t *out) {
+        if(b != biome) {
+            biome = b;
+            for(auto &t : tag) t = INT32_MIN;
+        }
+        for(int x = 0; x < SW; x++) {
+            int32_t fx = first + x;
+            int i = fx & 255;
+            if(tag[i] != fx) {
+                tag[i] = fx;
+                h[i] = int8_t(f(b, fx));
+            }
+            out[x] = h[i];
+        }
+    }
+};
+HillCache far_cache, near_cache;
+
+void render_sky(const Colours &c, const Pen *gradient, int biome, uint32_t time) {
     for(int y = 0; y <= HORIZON; y++) {
-        screen.pen = mix(c.sky_top, c.sky_low, float(y) / float(HORIZON));
+        screen.pen = gradient[y];
         screen.h_span(Point(0, y), SW);
     }
     // sun or moon, drifting with the bends
@@ -1121,24 +1327,23 @@ void render_sky(const Colours &c, int biome, uint32_t time) {
         screen.pen = c.sun;
         screen.circle(Point(sx, cy), r);
         // retro stripes through the lower half of the sun
-        screen.pen = mix(c.sky_top, c.sky_low, float(cy + 4) / float(HORIZON));
+        screen.pen = gradient[cy + 4];
         for(int i = 0; i < 4; i++) screen.h_span(Point(sx - r, cy + 2 + i * 3), r * 2 + 1);
     }
-    // far hills or skyline
-    for(int x = 0; x < SW; x++) {
-        int h = far_height(biome, x, run.bg_scroll);
-        screen.pen = c.far_hills;
-        screen.v_span(Point(x, HORIZON - h), h + 1);
-    }
+    // far hills or skyline; the parallax moves in whole pixels
+    int8_t far_h[SW], near_h[SW];
+    int32_t far_first = int32_t(floorf(run.bg_scroll * 0.3f));
+    far_cache.heights(biome, far_first, far_height, far_h);
+    near_cache.heights(biome, int32_t(floorf(run.bg_scroll)), near_height, near_h);
+    screen.pen = c.far_hills;
+    for(int x = 0; x < SW; x++) screen.v_span(Point(x, HORIZON - far_h[x]), far_h[x] + 1);
     if(biome == 1) {
         // lit windows on the skyline
+        screen.pen = Pen(255, 210, 90);
         for(int x = 1; x < SW; x += 3) {
-            float fx = float(x) + run.bg_scroll * 0.3f;
-            int block = int(floorf(fx / 9.0f));
-            int h = 8 + int(hash32(uint32_t(block) + 77u) % 18u);
-            for(int y = HORIZON - h + 2; y < HORIZON - 1; y += 3) {
+            int block = int(floorf(float(far_first + x) / 9.0f));
+            for(int y = HORIZON - far_h[x] + 2; y < HORIZON - 1; y += 3) {
                 if(hash32(uint32_t(block * 131 + x * 7 + y)) % 3u) continue;
-                screen.pen = Pen(255, 210, 90);
                 screen.pixel(Point(x, y));
             }
         }
@@ -1146,56 +1351,86 @@ void render_sky(const Colours &c, int biome, uint32_t time) {
     if(biome == 2) {
         // lava glow at the crater
         for(int x = 0; x < SW; x++) {
-            int h = far_height(biome, x, run.bg_scroll);
-            if(h >= 22) {
+            if(far_h[x] >= 22) {
                 screen.pen = Pen(255, 120 + int((time / 80u + uint32_t(x)) % 60u), 30);
-                screen.pixel(Point(x, HORIZON - h));
+                screen.pixel(Point(x, HORIZON - far_h[x]));
             }
         }
     }
-    for(int x = 0; x < SW; x++) {
-        int h = near_height(biome, x, run.bg_scroll);
-        screen.pen = c.near_hills;
-        screen.v_span(Point(x, HORIZON - h), h + 1);
-    }
+    screen.pen = c.near_hills;
+    for(int x = 0; x < SW; x++) screen.v_span(Point(x, HORIZON - near_h[x]), near_h[x] + 1);
 }
 
 // ---------------------------------------------------------------------------
 // Rendering: road
 
-void render_road(const Colours &c) {
+// Everything about a screen row of road that does not change from frame to
+// frame: its depth, fog and widths, and its colours until the biome colours
+// change (they only do during the fade between biomes).
+struct RoadRows {
+    bool geometry = false;
+    float z[SH], half[SH], kerb_w[SH];
+    int line_w[SH];
+    float fog[SH];
+    bool have_colours = false;
+    Colours colours;
+    Pen grass[2][SH], kerb[2][SH], road[2][SH], line[SH];
+    Pen sky[HORIZON + 1];
+
+    void update(const Colours &c) {
+        if(!geometry) {
+            geometry = true;
+            for(int y = HORIZON + 1; y < SH; y++) {
+                float k = float(y - HORIZON);  // = FOCAL / z
+                z[y] = FOCAL / k;
+                half[y] = ROAD_HALF * k;
+                kerb_w[y] = RUMBLE * k;
+                line_w[y] = std::max(1, int(0.025f * k));
+                float f = clampf((z[y] - 5.0f) / (Z_FAR - 5.0f), 0.0f, 1.0f);
+                fog[y] = f * f;
+            }
+        }
+        if(have_colours && memcmp(&c, &colours, sizeof(c)) == 0) return;
+        have_colours = true;
+        colours = c;
+        for(int y = 0; y <= HORIZON; y++) sky[y] = mix(c.sky_top, c.sky_low, float(y) / float(HORIZON));
+        for(int y = HORIZON + 1; y < SH; y++) {
+            for(int alt = 0; alt < 2; alt++) {
+                grass[alt][y] = mix(alt ? c.grass_a : c.grass_b, c.fog, fog[y]);
+                kerb[alt][y] = mix(alt ? c.kerb_a : c.kerb_b, c.fog, fog[y]);
+                road[alt][y] = mix(alt ? c.road_a : c.road_b, c.fog, fog[y]);
+            }
+            line[y] = mix(c.line, c.fog, fog[y]);
+        }
+    }
+};
+RoadRows rows;
+
+void render_road() {
     for(int y = HORIZON + 1; y < SH; y++) {
-        float k = float(y - HORIZON);  // = FOCAL / z
-        float z = FOCAL / k;
+        float k = float(y - HORIZON);
+        float z = rows.z[y];
         float cx = 64.0f + view_dx + (run.curve * z * z - run.cam_x) * k;
         float s = z + run.distance - Z_PLAYER;
-        bool alt = (int(floorf(s / SEGMENT)) & 1) != 0;
-        float fog = clampf((z - 5.0f) / (Z_FAR - 5.0f), 0.0f, 1.0f);
-        fog = fog * fog;
+        int alt = (int(floorf(s / SEGMENT)) & 1) != 0;
 
-        Pen grass = mix(alt ? c.grass_a : c.grass_b, c.fog, fog);
-        Pen kerb = mix(alt ? c.kerb_a : c.kerb_b, c.fog, fog);
-        Pen road = mix(alt ? c.road_a : c.road_b, c.fog, fog);
-        Pen line = mix(c.line, c.fog, fog);
-
-        screen.pen = grass;
+        // opaque spans are a fast copy, so drawing over the grass costs little
+        screen.pen = rows.grass[alt][y];
         screen.h_span(Point(0, y), SW);
-
-        float half = ROAD_HALF * k;
-        float kerb_w = RUMBLE * k;
+        float half = rows.half[y], kerb_w = rows.kerb_w[y];
         int l = int(cx - half - kerb_w);
         int r = int(cx + half + kerb_w);
-        screen.pen = kerb;
+        screen.pen = rows.kerb[alt][y];
         screen.h_span(Point(l, y), r - l + 1);
         l = int(cx - half);
         r = int(cx + half);
-        screen.pen = road;
+        screen.pen = rows.road[alt][y];
         screen.h_span(Point(l, y), r - l + 1);
 
         // dashed lane lines
         if(!alt) {
-            int w = std::max(1, int(0.025f * k));
-            screen.pen = line;
+            int w = rows.line_w[y];
+            screen.pen = rows.line[y];
             for(int side = -1; side <= 1; side += 2) {
                 int lx = int(cx + float(side) * LANE_W * 0.5f * k) - w / 2;
                 screen.h_span(Point(lx, y), w);
@@ -1306,7 +1541,7 @@ void render_player(uint32_t time) {
     if(run.grace_t > 0.0f && ((time / 70u) & 1u) && state == State::RUN) return;
 
     float lift = jump_height() * FOCAL / Z_PLAYER;
-    float px = 64.0f + view_dx + (run.x - run.cam_x) * FOCAL / Z_PLAYER;
+    float px = 64.0f + view_dx + (run.p.x - run.cam_x) * FOCAL / Z_PLAYER;
     float py = float(PLAYER_FEET_Y) + view_dy;
 
     // shadow shrinks while in the air
@@ -1316,7 +1551,7 @@ void render_player(uint32_t time) {
     if(state == State::CRASH || state == State::OVER) r = &spr::hurt;
     else if(dashing()) r = &spr::dash[(time / 80u) & 1u];
     else if(in_air()) {
-        float t = run.jump_t / JUMP_TIME;
+        float t = run.p.jump_t / JUMP_TIME;
         r = t < 0.22f ? &spr::jump_up : (t < 0.62f ? &spr::jump : &spr::jump_down);
     }
     else if(sliding()) r = ((time / 80u) & 1u) ? &spr::slide2 : &spr::slide;
@@ -1324,7 +1559,7 @@ void render_player(uint32_t time) {
     else r = &spr::run[int(run.run_anim) & 7];
 
     // lean into lane changes
-    float lean = (lane_x(run.lane) - run.x) / LANE_W;
+    float lean = (lane_x(run.p.lane) - run.p.x) / LANE_W;
     int bob = 0;  // the run frames carry their own bob
     Point at(int(px - 8.0f + lean * 2.0f), int(py - lift) - 24 - bob);
 
@@ -1423,11 +1658,11 @@ void render_hud(uint32_t time) {
 
     // distance bottom right
     char buf[16];
-    snprintf(buf, sizeof(buf), "%dM", int(run.distance * METRES_PER_UNIT));
+    snprintf(buf, sizeof(buf), "%luM", (unsigned long)run_metres());
     text_shadow(buf, minimal_font, Point(SW - 3, SH - 10), Pen(230, 230, 240), TextAlign::top_right);
 
     if(run.biome_banner > 0.0f && ((time / 150u) & 1u || run.biome_banner < 1.5f)) {
-        text_shadow(biomes[run.last_biome].name, outline_font, Point(64, 30), Pen(255, 255, 255), TextAlign::center_center);
+        text_shadow(biomes[run.last_biome].name, outline_font, Point(64, 26), Pen(255, 255, 255), TextAlign::center_center);
     }
 }
 
@@ -1457,8 +1692,55 @@ void render_menu(const char *const *items, int count, int y, int sel, uint32_t t
     }
 }
 
+Surface *logo = nullptr;  // assets/logo.png, 112x34
+
+// Big blocky glyphs for the countdown: 3x5 cells drawn as squares of
+// `scale` pixels with a dark outline, so "3, 2, 1, GO!" reads at a glance.
+const uint16_t *big_glyph(char c) {
+    static const uint16_t digits[10] = {
+        0b111101101101111, 0b010110010010111, 0b111001111100111, 0b111001111001111, 0b101101111001001,
+        0b111100111001111, 0b111100111101111, 0b111001010010010, 0b111101111101111, 0b111101111001111};
+    static const uint16_t g = 0b111100101101111, o = 0b111101101101111, bang = 0b010010010000010;
+    if(c >= '0' && c <= '9') return &digits[c - '0'];
+    if(c == 'G') return &g;
+    if(c == 'O') return &o;
+    if(c == '!') return &bang;
+    return nullptr;
+}
+
+void big_text(const char *str, int cx, int cy, int scale, Pen pen) {
+    int n = int(strlen(str));
+    int w = n * 3 * scale + (n - 1) * scale;
+    int x0 = cx - w / 2, y0 = cy - 5 * scale / 2;
+    for(int pass = 0; pass < 3; pass++) {
+        // 0: drop shadow, 1: outline, 2: fill with a lighter top row
+        for(int i = 0; i < n; i++) {
+            const uint16_t *bits = big_glyph(str[i]);
+            if(!bits) continue;
+            for(int row = 0; row < 5; row++) {
+                for(int col = 0; col < 3; col++) {
+                    if(!((*bits >> (14 - row * 3 - col)) & 1)) continue;
+                    Rect r(x0 + i * 4 * scale + col * scale, y0 + row * scale, scale, scale);
+                    if(pass == 0) { screen.pen = Pen(60, 10, 20, 200); r.x += 2; r.y += 3; }
+                    else if(pass == 1) { screen.pen = Pen(26, 15, 31); r.x -= 2; r.y -= 2; r.w += 4; r.h += 4; }
+                    else screen.pen = row == 0 ? mix(pen, Pen(255, 255, 255), 0.5f) : pen;
+                    screen.rectangle(r);
+                }
+            }
+        }
+    }
+}
+
+// Each number pops in large and settles, t = seconds since it appeared.
+int pop_scale(float t) { return t < 0.06f ? 7 : (t < 0.12f ? 6 : 5); }
+
 void render_logo(int y, uint32_t time) {
-    // "CHILI RUSH" with a wobble, letters coloured red to yellow
+    if(logo) {
+        int bob = int(sinf(float(time) * 0.004f) * 2.0f);
+        screen.blit(logo, Rect(0, 0, logo->bounds.w, logo->bounds.h), Point(64 - logo->bounds.w / 2, y + bob));
+        return;
+    }
+    // fallback: "CHILI RUSH" with a wobble, letters coloured red to yellow
     const char *word = "CHILI RUSH";
     int total = screen.measure_text(word, outline_font).w;
     int x = 64 - total / 2;
@@ -1476,20 +1758,20 @@ const char *pause_items[] = {"RESUME", "RESTART", "QUIT TO TITLE"};
 
 void render_title(uint32_t time) {
     dim(110);
-    render_logo(12, time);
+    render_logo(2, time);
     render_menu(title_items, 4, 58, menu_cursor, time);
     char buf[32];
     snprintf(buf, sizeof(buf), "BEST %lu", (unsigned long)save.best);
-    text_shadow(buf, minimal_font, Point(64, 36), Pen(255, 240, 160), TextAlign::top_center);
+    text_shadow(buf, minimal_font, Point(64, 39), Pen(255, 240, 160), TextAlign::top_center);
     // rank stars
     int stars = rank();
     if(stars > 0) {
         int shown = std::min(stars, 10);
         int x0 = 64 - shown * 5;
-        for(int i = 0; i < shown; i++) screen.blit(screen.sprites, spr::hud_star, Point(x0 + i * 10, 45));
+        for(int i = 0; i < shown; i++) screen.blit(screen.sprites, spr::hud_star, Point(x0 + i * 10, 48));
         if(stars > 10) {
             snprintf(buf, sizeof(buf), "+%d", stars - 10);
-            text_shadow(buf, minimal_font, Point(x0 + shown * 10 + 1, 45), Pen(255, 240, 160));
+            text_shadow(buf, minimal_font, Point(x0 + shown * 10 + 1, 48), Pen(255, 240, 160));
         }
     }
     if((time / 500u) & 1u) text_shadow("A: SELECT", minimal_font, Point(64, SH - 10), Pen(200, 190, 210), TextAlign::top_center);
@@ -1543,18 +1825,26 @@ void render_settings(uint32_t time) {
     render_menu(items, 3, 44, menu_cursor, time);
     char buf[40];
     snprintf(buf, sizeof(buf), "RUNS %lu", (unsigned long)save.runs);
-    text_shadow(buf, minimal_font, Point(64, 90), Pen(170, 160, 190), TextAlign::top_center);
-    snprintf(buf, sizeof(buf), "CHILIS %lu  BEST %luM", (unsigned long)save.total_chilis, (unsigned long)save.best_distance);
-    text_shadow(buf, minimal_font, Point(64, 100), Pen(170, 160, 190), TextAlign::top_center);
+    text_shadow(buf, minimal_font, Point(64, 88), Pen(170, 160, 190), TextAlign::top_center);
+    snprintf(buf, sizeof(buf), "CHILIS %lu", (unsigned long)save.total_chilis);
+    text_shadow(buf, minimal_font, Point(64, 97), Pen(170, 160, 190), TextAlign::top_center);
+    snprintf(buf, sizeof(buf), "FURTHEST %luM", (unsigned long)save.best_distance);
+    text_shadow(buf, minimal_font, Point(64, 106), Pen(170, 160, 190), TextAlign::top_center);
+}
+
+void render_resume() {
+    char buf[12];
+    snprintf(buf, sizeof(buf), "%d", 3 - std::min(2, state_ticks / 30));
+    big_text(buf, 64, 62, pop_scale(float(state_ticks % 30) * 0.01f), Pen(255, 255, 255));
 }
 
 void render_ready(uint32_t time) {
-    int n = 3 - int(state_time / 0.4f);
+    int n = 3 - state_ticks / 40;
     char buf[16];
     if(n > 0) snprintf(buf, sizeof(buf), "%d", n);
     else snprintf(buf, sizeof(buf), "GO!");
-    Pen pen = n > 0 ? Pen(255, 255, 255) : Pen(255, 220, 60);
-    text_shadow(buf, outline_font, Point(64, 50), pen, TextAlign::center_center);
+    Pen pen = n > 0 ? mix(Pen(255, 255, 255), Pen(255, 200, 60), float(3 - n) / 2.0f) : Pen(255, 220, 60);
+    big_text(buf, 64, 62, pop_scale(float(state_ticks % 40) * 0.01f), pen);
     (void)time;
 }
 
@@ -1566,7 +1856,7 @@ void render_over(uint32_t time) {
     float t = clampf(state_time / 0.8f, 0.0f, 1.0f);
     snprintf(buf, sizeof(buf), "%lu", (unsigned long)(uint32_t(float(run.score) * t)));
     text_shadow(buf, outline_font, Point(64, 24), Pen(255, 255, 255), TextAlign::top_center);
-    snprintf(buf, sizeof(buf), "%dM   %lu CHILIS", int(run.distance * METRES_PER_UNIT), (unsigned long)run.chilis);
+    snprintf(buf, sizeof(buf), "%luM   %lu CHILIS", (unsigned long)run_metres(), (unsigned long)run.chilis);
     text_shadow(buf, minimal_font, Point(64, 40), Pen(255, 220, 120), TextAlign::top_center);
     snprintf(buf, sizeof(buf), "BEST %lu", (unsigned long)save.best);
     text_shadow(buf, minimal_font, Point(64, 49), Pen(200, 190, 210), TextAlign::top_center);
@@ -1575,14 +1865,18 @@ void render_over(uint32_t time) {
         const Mission &m = save.missions[i];
         int y = 62 + i * 13;
         bool ok = mission_complete[i];
-        screen.pen = ok ? Pen(80, 200, 100, 90) : Pen(255, 255, 255, 25);
+        uint32_t v = std::min(mission_value(m.type), m.target);
+        // the box fills up with the progress; the target is in the text
+        screen.pen = Pen(255, 255, 255, 25);
         screen.rectangle(Rect(4, y - 2, SW - 8, 12));
+        int fill = ok ? SW - 8 : int(float(SW - 8) * float(v) / float(m.target));
+        screen.pen = ok ? Pen(80, 200, 100, 90) : Pen(255, 190, 80, 55);
+        screen.rectangle(Rect(4, y - 2, fill, 12));
         char mt[28];
         mission_text(m, mt, sizeof(mt));
         text_shadow(mt, minimal_font, Point(7, y), ok ? Pen(150, 255, 160) : Pen(230, 230, 240));
-        uint32_t v = std::min(mission_value(m.type), m.target);
         if(ok) snprintf(buf, sizeof(buf), "OK");
-        else snprintf(buf, sizeof(buf), "%lu/%lu", (unsigned long)v, (unsigned long)m.target);
+        else snprintf(buf, sizeof(buf), "%lu", (unsigned long)v);
         text_shadow(buf, minimal_font, Point(SW - 7, y), ok ? Pen(150, 255, 160) : Pen(170, 160, 190), TextAlign::top_right);
     }
     if(state_time > 0.6f) {
@@ -1609,11 +1903,17 @@ void render_pause(uint32_t time) {
 // ---------------------------------------------------------------------------
 // Engine entry points
 
-void on_quit_save() { store_game(); }
+// The console is quitting the game (HOME held): keep the run that was going on.
+void on_quit_save() {
+    if(state == State::RUN || state == State::PAUSE || state == State::RESUME) record_run();
+    if(!attract) finish_missions();
+    store_game();
+}
 
 void init() {
     set_screen_mode(ScreenMode::hires);
     screen.sprites = Surface::load(asset_sprites);
+    logo = Surface::load(asset_logo);
     load_game();
     audio::init();
     audio::set_music(save.music);
@@ -1634,7 +1934,7 @@ void render(uint32_t time) {
     Colours c = colours_now(run.distance);
     int biome = biome_at(run.distance);
     // near the end of a biome draw the next one's scenery behind the fade
-    if(fmodf(run.distance, BIOME_LENGTH) > BIOME_LENGTH - BIOME_BLEND * 0.5f) biome = (biome + 1) % 3;
+    if(in_biome(run.distance) > BIOME_LENGTH - BIOME_BLEND * 0.5f) biome = (biome + 1) % 3;
 
     // screen shake moves the road, sprites and player, not the HUD
     view_dx = view_dy = 0.0f;
@@ -1644,11 +1944,21 @@ void render(uint32_t time) {
         view_dy = (float((h >> 8) & 0xff) / 255.0f - 0.5f) * shake * 8.0f;
     }
 
-    render_sky(c, biome, time);
-    render_road(c);
+#ifdef CHILI_SELFTEST
+#define PROFILE(n) st_profile(n)
+#else
+#define PROFILE(n)
+#endif
+    PROFILE(0);
+    rows.update(c);
+    render_sky(c, rows.sky, biome, time);
+    PROFILE(1);
+    render_road();
+    PROFILE(2);
     render_objects(time, true);
     render_player(time);
     render_objects(time, false);
+    PROFILE(3);
     render_particles();
     if(state == State::RUN || (attract && state == State::TITLE)) render_speed_lines(time);
 
@@ -1665,8 +1975,13 @@ void render(uint32_t time) {
         case State::HELP: render_help(time); break;
         case State::SETTINGS: render_settings(time); break;
         case State::READY: render_hud(time); render_ready(time); break;
-        case State::RUN: render_hud(time); render_popups(); break;
+        case State::RUN:
+            render_hud(time);
+            render_popups();
+            if(run_ticks_since_go < 35) big_text("GO!", 64, 62, pop_scale(float(run_ticks_since_go) * 0.01f), Pen(255, 220, 60));
+            break;
         case State::PAUSE: render_hud(time); render_pause(time); break;
+        case State::RESUME: render_hud(time); render_resume(); break;
         case State::CRASH: render_hud(time); render_popups(); break;
         case State::OVER: render_over(time); break;
     }
@@ -1686,7 +2001,7 @@ void render(uint32_t time) {
         screen.pen = Pen(120, 255, 120);
         screen.text(buf, minimal_font, Point(1, SH - 18));
     }
-
+    PROFILE(4);
 }
 
 namespace {
@@ -1710,6 +2025,11 @@ void begin_run() {
     audio::sfx(audio::Sfx::COUNTDOWN);
 }
 
+void resume_run() {
+    set_state(State::RESUME);
+    audio::sfx(audio::Sfx::COUNTDOWN);
+}
+
 void to_title() {
     start_run(true);
     set_state(State::TITLE);
@@ -1722,6 +2042,16 @@ void to_title() {
 void update(uint32_t time) {
     audio::update(time);
     state_time += DT;
+    state_ticks++;
+    if(run_ticks_since_go < 1000) run_ticks_since_go++;
+
+    // After the console's system menu (HOME) or any long stall the engine
+    // runs every missed update at once, with old timestamps. Pause rather
+    // than play seconds of the run blind.
+    if(now() - time > 250u && (state == State::RUN || state == State::READY || state == State::RESUME)) {
+        set_state(State::PAUSE);
+        menu_cursor = 0;
+    }
 
     switch(state) {
         case State::TITLE:
@@ -1789,23 +2119,35 @@ void update(uint32_t time) {
         }
 
         case State::READY: {
-            int before = int((state_time - DT) / 0.4f);
-            int after = int(state_time / 0.4f);
-            if(after != before) {
-                if(after < 3) audio::sfx(audio::Sfx::COUNTDOWN);
-                else if(after == 3) audio::sfx(audio::Sfx::GO);
-            }
+            // 3 (beep at the start), 2, 1, GO: 0.4 s each, counted in updates
+            if(state_ticks == 40 || state_ticks == 80) audio::sfx(audio::Sfx::COUNTDOWN);
             // lanes can be chosen during the countdown
             if(buttons.pressed & Button::DPAD_LEFT) change_lane(-1);
             if(buttons.pressed & Button::DPAD_RIGHT) change_lane(1);
             update_player();
-            if(state_time >= 1.2f) {
+            if(state_ticks >= 120) {
+                audio::sfx(audio::Sfx::GO);
                 set_state(State::RUN);
                 audio::play(audio::Track::RUN);
-                popup("GO!", 64, 50, Pen(255, 220, 60));
+                run_ticks_since_go = 0;
             }
             break;
         }
+
+        case State::RESUME:
+            // 3, 2, 1 after the pause menu with the world held still, so a
+            // resume never drops the player straight into an obstacle
+            if(buttons.pressed & (Button::MENU | Button::HOME)) {
+                set_state(State::PAUSE);
+                menu_cursor = 0;
+                break;
+            }
+            if(state_ticks == 30 || state_ticks == 60) audio::sfx(audio::Sfx::COUNTDOWN);
+            if(state_ticks >= 90) {
+                audio::sfx(audio::Sfx::GO);
+                set_state(State::RUN);
+            }
+            break;
 
         case State::RUN:
             if(buttons.pressed & (Button::MENU | Button::HOME)) {
@@ -1819,18 +2161,15 @@ void update(uint32_t time) {
 
         case State::PAUSE:
             if(buttons.pressed & (Button::MENU | Button::B)) {
-                set_state(State::RUN);
+                resume_run();
                 break;
             }
             if(menu_nav(3)) {
                 audio::sfx(audio::Sfx::MENU_OK);
-                if(menu_cursor == 0) set_state(State::RUN);
+                if(menu_cursor == 0) resume_run();
                 else {
-                    // leaving a run counts like a crash for the totals but
-                    // not for the best score unless it was beaten
-                    save.runs++;
-                    save.total_chilis += run.chilis;
-                    if(run.score > save.best) save.best = run.score;
+                    // leaving a run counts like a crash: totals, best, missions
+                    record_run();
                     finish_run_save();
                     if(menu_cursor == 1) begin_run();
                     else to_title();
@@ -1864,3 +2203,7 @@ void update(uint32_t time) {
     update_effects();
     (void)time;
 }
+
+#ifdef CHILI_SELFTEST
+#include "selftest.hpp"
+#endif

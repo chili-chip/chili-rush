@@ -5,3 +5,5 @@
 assets.cpp:
   assets/sprites.png:
     name: asset_sprites
+  assets/logo.png:
+    name: asset_logo
